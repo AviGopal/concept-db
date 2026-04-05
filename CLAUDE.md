@@ -248,3 +248,27 @@ Flow:
 2. **concept-db → metabob-activity-api**: Usage forwarding via `/v2/activities/impulse-relevance`
 3. **concept-db → SurrealDB**: Persistent storage of concepts and edges
 4. **Upkeep activities**: Create traces stored in metabob-activity-api
+
+## CI/CD Integration
+
+This vessel is deployed via the deployment repository CI/CD pipeline.
+
+### Before Push
+
+```bash
+bun test        # Tests must pass
+bun run lint    # Linting must pass (if script exists)
+```
+
+### Deployment Flow
+
+1. Push changes to main workspace
+2. Sync to `repos/deployment/vessels/concept-db/`
+3. Push to `dev` branch triggers canary deployment
+4. Health endpoint validated before promotion
+
+## Related Documentation
+
+- [IMPULSE_ACTIVITY_FOUNDATION.md](../../docs/architecture/IMPULSE_ACTIVITY_FOUNDATION.md)
+- [DEPLOYMENT_WORKFLOW.md](../deployment/DEPLOYMENT_WORKFLOW.md)
+- [Root CLAUDE.md](../../CLAUDE.md)
