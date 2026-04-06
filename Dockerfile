@@ -5,7 +5,11 @@
 #
 # Build: docker build -t concept-db:latest .
 
-FROM oven/bun:1 as build
+# Build arguments for version embedding
+ARG BUILD_SHA
+ARG BUILD_VERSION
+
+FROM oven/bun:1.2 as build
 WORKDIR /app
 
 # Copy package files
@@ -23,8 +27,12 @@ COPY tsconfig.json ./
 # Verify TypeScript compilation
 RUN bun build src/index.ts --target bun --outdir dist
 
-FROM oven/bun:1-slim
+FROM oven/bun:1.2-slim
 WORKDIR /app
+
+# Re-declare build args for this stage
+ARG BUILD_SHA
+ARG BUILD_VERSION
 
 # Copy dependencies and source from build stage
 COPY --from=build /app/node_modules ./node_modules
@@ -38,6 +46,9 @@ COPY --from=build /app/package.json ./
 ENV NODE_ENV=production
 ENV PORT=8081
 ENV HOST=0.0.0.0
+# Version information
+ENV BUILD_SHA=${BUILD_SHA}
+ENV BUILD_VERSION=${BUILD_VERSION}
 
 # Expose HTTP port
 EXPOSE 8081

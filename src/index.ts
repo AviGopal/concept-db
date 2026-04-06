@@ -16,6 +16,7 @@ import { surrealDB } from './db/surreal';
 import { jwtAuthMiddleware } from './middleware/jwtAuth';
 import { registerLifecycleHooks } from './lifecycle/hooks';
 import { startScheduler, stopScheduler, getSchedulerStatus } from './upkeep/scheduler';
+import { VesselHeartbeat } from './vessel-heartbeat';
 
 // Routes
 import { mcp } from './routes/mcp';
@@ -138,6 +139,9 @@ app.onError((err, c) => {
   }, 500);
 });
 
+// Vessel heartbeat instance (global for shutdown)
+let vesselHeartbeat: VesselHeartbeat | null = null;
+
 // Startup
 async function startup() {
   logger.info('Starting concept-db vessel', {
@@ -159,6 +163,43 @@ async function startup() {
       startScheduler();
     }
 
+    // Start vessel heartbeat (SPEC-004)
+    // Note: This requires JWT token to authenticate with activity-api
+    // For now, we'll only start heartbeat if JWT_TOKEN env var is provided
+    const jwtToken = process.env.JWT_TOKEN;
+    if (jwtToken) {
+      const vesselId = process.env.VESSEL_ID || 'concept-db';
+      const endpoint = process.env.VESSEL_ENDPOINT || `http://${config.host}:${config.port}`;
+
+      vesselHeartbeat = new VesselHeartbeat({
+        vesselId,
+        vesselName: 'Concept Database',
+        endpoint,
+        activityApiUrl: config.activityApi.url,
+        jwtToken,
+        shapes: ['concept'],
+        capabilities: [
+          {
+            type: 'impulse-resolver',
+            shapes: ['concept'],
+          },
+          {
+            type: 'mcp-server',
+            mcp: {
+              protocol: '2024-11-05',
+              tools: ['concept_create', 'concept_resolve', 'concept_link'],
+            },
+          },
+        ],
+        ttl: 300, // 5 minutes
+      });
+
+      await vesselHeartbeat.start();
+      logger.info('Vessel heartbeat started');
+    } else {
+      logger.warn('JWT_TOKEN not provided, vessel heartbeat disabled');
+    }
+
     logger.info('concept-db vessel started', {
       port: config.port,
       host: config.host,
@@ -174,6 +215,12 @@ async function startup() {
 // Shutdown
 async function shutdown() {
   logger.info('Shutting down concept-db vessel');
+
+  // Stop vessel heartbeat
+  if (vesselHeartbeat) {
+    await vesselHeartbeat.stop();
+    logger.info('Vessel heartbeat stopped');
+  }
 
   stopScheduler();
 

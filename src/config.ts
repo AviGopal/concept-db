@@ -52,6 +52,9 @@ export interface Config {
   cors: {
     origins: string[];
   };
+
+  // Environment
+  environment?: string;
 }
 
 function parseEnvInt(key: string, defaultValue: number): number {
@@ -130,6 +133,8 @@ export function loadConfig(): Config {
     cors: {
       origins: process.env.CORS_ORIGINS?.split(',') || ['*'],
     },
+
+    environment: process.env.NODE_ENV || process.env.ENVIRONMENT,
   };
 }
 
