@@ -17,6 +17,11 @@ import { jwtAuthMiddleware } from './middleware/jwtAuth';
 import { registerLifecycleHooks } from './lifecycle/hooks';
 import { startScheduler, stopScheduler, getSchedulerStatus } from './upkeep/scheduler';
 import { discoveryClient } from './services/discovery-client';
+import { ExecutionObserver } from './services/execution-observer';
+
+// Passive listener for activity-api execution events. Constructed at module
+// load; lifecycle is driven by startup()/shutdown().
+const executionObserver = new ExecutionObserver();
 
 // Routes
 import { mcp } from './routes/mcp';
@@ -188,6 +193,17 @@ async function startup() {
       logger.info('[Discovery] Discovery integration disabled');
     }
 
+    // Start passive execution observer (WebSocket client of activity-api).
+    // Non-blocking: `start()` logs and bails if disabled or misconfigured,
+    // and the reconnect loop handles transient activity-api outages.
+    try {
+      executionObserver.start();
+    } catch (error) {
+      logger.warn('[Observer] Failed to start', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
     logger.info('concept-db vessel started', {
       port: config.port,
       host: config.host,
@@ -203,6 +219,16 @@ async function startup() {
 // Shutdown
 async function shutdown() {
   logger.info('Shutting down concept-db vessel');
+
+  // Stop observer before discovery deregistration so the ws loop doesn't
+  // try to reconnect during teardown.
+  try {
+    executionObserver.stop();
+  } catch (error) {
+    logger.warn('[Observer] Error during shutdown', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   // Deregister from discovery-vessel and stop heartbeats.
   try {

@@ -37,6 +37,13 @@ export interface Config {
     apiKey: string;
   };
 
+  // Passive execution observer (WebSocket client of activity-api)
+  observer: {
+    enabled: boolean;
+    reconnectInitialMs: number;
+    reconnectMaxMs: number;
+  };
+
   // Discovery Vessel Integration
   discovery: {
     enabled: boolean;
@@ -151,6 +158,12 @@ export function loadConfig(): Config {
 
     metabob: {
       apiKey: process.env.METABOB_API_KEY || '',
+    },
+
+    observer: {
+      enabled: parseEnvBool('OBSERVER_ENABLED', true),
+      reconnectInitialMs: parseEnvInt('OBSERVER_RECONNECT_INITIAL_MS', 1000),
+      reconnectMaxMs: parseEnvInt('OBSERVER_RECONNECT_MAX_MS', 30000),
     },
 
     discovery: {
