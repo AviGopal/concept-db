@@ -16,12 +16,13 @@ import { surrealDB } from './db/surreal';
 import { jwtAuthMiddleware } from './middleware/jwtAuth';
 import { registerLifecycleHooks } from './lifecycle/hooks';
 import { startScheduler, stopScheduler, getSchedulerStatus } from './upkeep/scheduler';
-import { VesselHeartbeat } from './vessel-heartbeat';
+import { discoveryClient } from './services/discovery-client';
 
 // Routes
 import { mcp } from './routes/mcp';
 import { concepts } from './routes/concepts';
 import { upkeep } from './routes/upkeep';
+import { impulses } from './routes/impulses';
 
 const app = new Hono();
 
@@ -75,6 +76,7 @@ app.get('/health', async (c) => {
 app.route('/mcp', mcp);
 app.route('/concepts', concepts);
 app.route('/upkeep', upkeep);
+app.route('/v2/impulses', impulses);
 
 // Root endpoint
 app.get('/', (c) => {
@@ -112,6 +114,9 @@ app.get('/', (c) => {
         start: 'POST /upkeep/scheduler/start',
         stop: 'POST /upkeep/scheduler/stop',
       },
+      impulses: {
+        resolve: 'POST /v2/impulses/resolve',
+      },
     },
   });
 });
@@ -139,9 +144,6 @@ app.onError((err, c) => {
   }, 500);
 });
 
-// Vessel heartbeat instance (global for shutdown)
-let vesselHeartbeat: VesselHeartbeat | null = null;
-
 // Startup
 async function startup() {
   logger.info('Starting concept-db vessel', {
@@ -163,41 +165,27 @@ async function startup() {
       startScheduler();
     }
 
-    // Start vessel heartbeat (SPEC-004)
-    // Note: This requires JWT token to authenticate with activity-api
-    // For now, we'll only start heartbeat if JWT_TOKEN env var is provided
-    const jwtToken = process.env.JWT_TOKEN;
-    if (jwtToken) {
-      const vesselId = process.env.VESSEL_ID || 'concept-db';
-      const endpoint = process.env.VESSEL_ENDPOINT || `http://${config.host}:${config.port}`;
+    // Discovery-vessel registration (replaces deprecated /v2/vessels/register).
+    // Non-blocking: failures log and continue; the vessel keeps serving
+    // requests even if discovery-vessel is unreachable.
+    if (discoveryClient.isEnabled()) {
+      discoveryClient.register()
+        .then((success) => {
+          if (success) {
+            logger.info('[Discovery] Initial registration successful');
+          } else {
+            logger.warn('[Discovery] Initial registration failed (will retry)');
+          }
+        })
+        .catch((error) => {
+          logger.error('[Discovery] Initial registration error', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
 
-      vesselHeartbeat = new VesselHeartbeat({
-        vesselId,
-        vesselName: 'Concept Database',
-        endpoint,
-        activityApiUrl: config.activityApi.url,
-        jwtToken,
-        shapes: ['concept'],
-        capabilities: [
-          {
-            type: 'impulse-resolver',
-            shapes: ['concept'],
-          },
-          {
-            type: 'mcp-server',
-            mcp: {
-              protocol: '2024-11-05',
-              tools: ['concept_create', 'concept_resolve', 'concept_link'],
-            },
-          },
-        ],
-        ttl: 300, // 5 minutes
-      });
-
-      await vesselHeartbeat.start();
-      logger.info('Vessel heartbeat started');
+      discoveryClient.startHeartbeatManager();
     } else {
-      logger.warn('JWT_TOKEN not provided, vessel heartbeat disabled');
+      logger.info('[Discovery] Discovery integration disabled');
     }
 
     logger.info('concept-db vessel started', {
@@ -216,10 +204,13 @@ async function startup() {
 async function shutdown() {
   logger.info('Shutting down concept-db vessel');
 
-  // Stop vessel heartbeat
-  if (vesselHeartbeat) {
-    await vesselHeartbeat.stop();
-    logger.info('Vessel heartbeat stopped');
+  // Deregister from discovery-vessel and stop heartbeats.
+  try {
+    await discoveryClient.shutdown();
+  } catch (error) {
+    logger.warn('[Discovery] Error during shutdown', {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
   stopScheduler();

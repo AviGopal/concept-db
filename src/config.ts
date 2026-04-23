@@ -32,6 +32,23 @@ export interface Config {
     timeout: number;
   };
 
+  // Metabob credentials (shared across Metabob-managed services)
+  metabob: {
+    apiKey: string;
+  };
+
+  // Discovery Vessel Integration
+  discovery: {
+    enabled: boolean;
+    endpoint: string;
+    vesselId: string;
+    vesselName: string;
+    heartbeatIntervalMs: number;
+    retryAttempts: number;
+    retryBackoffMs: number;
+    shapes: string[];
+  };
+
   // Upkeep scheduler
   upkeep: {
     intervalMs: number;     // How often to run upkeep (default: 5 minutes)
@@ -66,6 +83,21 @@ function parseEnvBool(key: string, defaultValue: boolean): boolean {
   const value = process.env[key];
   if (!value) return defaultValue;
   return value.toLowerCase() === 'true' || value === '1';
+}
+
+/**
+ * Generates vessel ID from environment variables.
+ * Uses VESSEL_ID if set, otherwise generates from hostname/pod name.
+ */
+function generateVesselId(): string {
+  if (process.env.VESSEL_ID) {
+    return process.env.VESSEL_ID;
+  }
+
+  const hostname = process.env.HOSTNAME || 'concept-db';
+  const podName = process.env.POD_NAME || hostname;
+
+  return `concept-db-${podName}`;
 }
 
 /**
@@ -115,6 +147,31 @@ export function loadConfig(): Config {
     activityApi: {
       url: process.env.ACTIVITY_API_URL || 'http://metabob-activity-api:8080',
       timeout: parseEnvInt('ACTIVITY_API_TIMEOUT', 30000),
+    },
+
+    metabob: {
+      apiKey: process.env.METABOB_API_KEY || '',
+    },
+
+    discovery: {
+      enabled: parseEnvBool('DISCOVERY_ENABLED', true),
+      endpoint:
+        process.env.DISCOVERY_VESSEL_ENDPOINT ||
+        'http://discovery-vessel.activity-system.svc.cluster.local:8080',
+      vesselId: generateVesselId(),
+      vesselName: process.env.VESSEL_NAME || 'concept-db',
+      heartbeatIntervalMs: parseEnvInt('DISCOVERY_HEARTBEAT_INTERVAL_MS', 60000),
+      retryAttempts: parseEnvInt('DISCOVERY_RETRY_ATTEMPTS', 3),
+      retryBackoffMs: parseEnvInt('DISCOVERY_RETRY_BACKOFF_MS', 1000),
+      // Shapes advertised to discovery-vessel. Must match cases in
+      // src/routes/impulses.ts. Don't advertise shapes without a dispatch case.
+      shapes: [
+        'concept',
+        'conceptGraph',
+        'relatedConcepts',
+        'conceptUsageStats',
+        'conceptSequence',
+      ],
     },
 
     upkeep: {
