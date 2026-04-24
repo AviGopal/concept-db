@@ -25,6 +25,16 @@ interface VesselRegistration {
   shapes: string[];
   protocol?: string;
   metadata?: Record<string, unknown>;
+  // Resolver contract (Wave 1B, 2026-04-23). Optional fields describing how
+  // callers should invoke this vessel's impulse resolver. discovery-vessel
+  // (Wave 1A) persists these; minibob (Wave 1D) will consume them to drop
+  // hardcoded per-vessel logic. Field names must match discovery-vessel's
+  // RegistrationRequest exactly — concept-db registers over HTTP and does
+  // not import that type.
+  resolve_endpoint?: string;
+  resolve_request_format?: string;
+  auth_scheme?: string;
+  resolve_timeout_ms?: number;
 }
 
 interface RegisterResponse {
@@ -91,6 +101,17 @@ export class DiscoveryClient {
           podId: process.env.HOSTNAME || 'unknown',
           port: config.port,
         },
+        // Resolver contract — tells callers (e.g. minibob) how to invoke
+        // this vessel's impulse resolver without hardcoded per-vessel
+        // knowledge. See src/routes/impulses.ts for the implementation.
+        // Timeout is 10s: resolveConcept performs up to ~5 sequential
+        // SurrealDB round-trips (fetch root, outgoing edges, incoming
+        // edges, update, neighbor fetch) plus optional graph walks on
+        // larger shapes; 5s is occasionally tight under cold-cache load.
+        resolve_endpoint: '/v2/impulses/resolve',
+        resolve_request_format: 'pointer',
+        auth_scheme: 'ApiKey',
+        resolve_timeout_ms: 10000,
       };
 
       logger.info('[Discovery] Registering vessel', {
