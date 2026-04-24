@@ -236,6 +236,55 @@ export const conceptTools: MCPTool[] = [
     },
   },
   {
+    name: 'concept_upsert_by_signature',
+    description:
+      'Idempotently upsert a concept keyed on an impulse signature (pointer_type, shape). Returns the concept id and whether it was newly created. Used by learn-impulse-relationships to materialise one concept per unique impulse signature seen in traces.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pointer_type: {
+          type: 'string',
+          description: 'The impulse pointer type (e.g. "file", "concept", "activityExecutionTrace")',
+        },
+        shape: {
+          type: 'string',
+          description: 'The impulse shape (e.g. "file", "concept", "activityExecutionTrace")',
+        },
+      },
+      required: ['pointer_type', 'shape'],
+    },
+  },
+  {
+    name: 'concept_cooccurrence_edges',
+    description:
+      'Return co-occurrence edges between impulse-signature concepts, sorted by weight DESC. Optionally filter by a (pointer_type, shape) signature to get edges touching that signature. Used by activities to query the learned impulse relationship graph without going through /v2/impulses/resolve.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pointer_type: {
+          type: 'string',
+          description: 'Optional pointer_type filter. If paired with `shape`, keeps only edges touching that signature.',
+        },
+        shape: {
+          type: 'string',
+          description: 'Optional shape filter. If paired with `pointer_type`, keeps only edges touching that signature.',
+        },
+        min_weight: {
+          type: 'number',
+          description: 'Minimum edge weight (0.0-1.0)',
+          minimum: 0,
+          maximum: 1,
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum edges to return (default 100)',
+          default: 100,
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'concept_sequence_record',
     description: 'Record a sequence of concepts that were resolved together, creating sequence edges',
     inputSchema: {

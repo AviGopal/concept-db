@@ -23,7 +23,9 @@ import {
   resolveConcept,
   getNeighbors,
   getConceptById,
+  upsertBySignature,
 } from '../resolvers/concept';
+import { getImpulseCooccurrenceEdges } from '../resolvers/edge';
 import { getUsageStats } from '../resolvers/usage';
 import { getSequenceNeighbors } from '../resolvers/sequence';
 import type { EdgeType } from '../models/schemas';
@@ -36,6 +38,8 @@ const SUPPORTED_SHAPES = [
   'relatedConcepts',
   'conceptUsageStats',
   'conceptSequence',
+  'impulseSignatureConcept',
+  'impulseCooccurrenceEdges',
 ] as const;
 
 interface ResolveResponse {
@@ -226,6 +230,76 @@ impulses.post('/resolve', async (c) => {
             concept_id: pointer.concept_id,
             direction: pointer.direction ?? 'next',
             count: neighbors.length,
+          },
+        };
+        break;
+      }
+
+      case 'impulseSignatureConcept': {
+        const pointerType = pointer.pointer_type;
+        const sigShape = pointer.shape;
+        if (typeof pointerType !== 'string' || typeof sigShape !== 'string') {
+          return c.json(
+            {
+              error:
+                'pointer.pointer_type and pointer.shape are required for shape "impulseSignatureConcept"',
+            },
+            400,
+          );
+        }
+        const { id, created } = await upsertBySignature(
+          { pointerType, shape: sigShape, orgId },
+          jwtToken,
+        );
+        // Return as a `concept`-shaped response so activities can consume it
+        // with the same handling as the normal `concept` shape.
+        const concept = await getConceptById(id, orgId, jwtToken);
+        if (!concept) {
+          throw new Error(`Upserted concept not found: ${id}`);
+        }
+        result = {
+          content: concept.content,
+          metadata: {
+            shape: 'concept',
+            signature_shape: 'impulseSignatureConcept',
+            created,
+            concept_id: id,
+            pointer_type: pointerType,
+            impulse_shape: sigShape,
+            concept_shape: concept.shape,
+            summary: concept.summary,
+            source_type: concept.source_type,
+            token_estimate: concept.token_estimate,
+            relevance: concept.relevance,
+          },
+        };
+        break;
+      }
+
+      case 'impulseCooccurrenceEdges': {
+        const pointerType =
+          typeof pointer.pointer_type === 'string' ? pointer.pointer_type : undefined;
+        const sigShape =
+          typeof pointer.shape === 'string' ? pointer.shape : undefined;
+        const minWeight =
+          typeof pointer.min_weight === 'number' ? pointer.min_weight : undefined;
+        const limit = typeof pointer.limit === 'number' ? pointer.limit : 100;
+
+        const edges = await getImpulseCooccurrenceEdges(
+          { pointerType, shape: sigShape, minWeight, limit, orgId },
+          jwtToken,
+        );
+        result = {
+          content: { edges },
+          metadata: {
+            shape: 'impulseCooccurrenceEdges',
+            count: edges.length,
+            filter: {
+              pointer_type: pointerType,
+              shape: sigShape,
+              min_weight: minWeight,
+              limit,
+            },
           },
         };
         break;

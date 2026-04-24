@@ -15,6 +15,7 @@ import {
   getNeighbors,
   getConceptById,
   updateConcept,
+  upsertBySignature,
 } from '../resolvers/concept';
 import { createEdge, getEdgesForConcept } from '../resolvers/edge';
 import { recordUsage, getUsageHistory, getUsageStats } from '../resolvers/usage';
@@ -116,6 +117,54 @@ concepts.get('/search', async (c) => {
   } catch (error) {
     const err = error as Error;
     logger.error('Search failed', { error: err.message });
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+/**
+ * Idempotently upsert a concept keyed on an impulse signature.
+ * POST /concepts/upsert-by-signature
+ *
+ * Body: { pointer_type: string, shape: string }
+ * Response: { id: string, created: boolean }
+ */
+concepts.post('/upsert-by-signature', async (c) => {
+  const jwtAuth = getJwtAuthFromContext(c);
+
+  if (config.auth.requireAuth && !jwtAuth) {
+    return c.json({ error: 'Authentication required' }, 401);
+  }
+
+  const orgId = jwtAuth?.orgId || 'default';
+
+  let body: { pointer_type?: unknown; shape?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const pointerType = body?.pointer_type;
+  const shape = body?.shape;
+
+  if (typeof pointerType !== 'string' || typeof shape !== 'string') {
+    return c.json(
+      { error: 'pointer_type and shape are required (string)' },
+      400,
+    );
+  }
+
+  try {
+    const result = await upsertBySignature(
+      { pointerType, shape, orgId },
+      jwtAuth?.jwtToken,
+    );
+    return c.json(result, result.created ? 201 : 200);
+  } catch (error) {
+    const err = error as Error;
+    logger.error('Failed to upsert impulse_signature concept', {
+      error: err.message,
+    });
     return c.json({ error: err.message }, 400);
   }
 });

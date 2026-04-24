@@ -11,7 +11,8 @@ import {
   searchConcepts,
   getNeighbors,
 } from '../resolvers/concept';
-import { createEdge } from '../resolvers/edge';
+import { upsertEdge, getImpulseCooccurrenceEdges } from '../resolvers/edge';
+import { upsertBySignature } from '../resolvers/concept';
 import { recordUsage } from '../resolvers/usage';
 import { recordSequence } from '../resolvers/sequence';
 import {
@@ -57,8 +58,36 @@ export async function handleToolCall(
 
       case 'concept_link': {
         const request = LinkConceptsRequestSchema.parse(args);
-        const edge = await createEdge(request, orgId, jwtToken);
-        return { success: true, result: edge };
+        const result = await upsertEdge(request, orgId, jwtToken);
+        return { success: true, result };
+      }
+
+      case 'concept_upsert_by_signature': {
+        const pointerType = args.pointer_type;
+        const shape = args.shape;
+        if (typeof pointerType !== 'string' || typeof shape !== 'string') {
+          return {
+            success: false,
+            error: 'concept_upsert_by_signature requires string `pointer_type` and `shape`',
+          };
+        }
+        const result = await upsertBySignature(
+          { pointerType, shape, orgId },
+          jwtToken,
+        );
+        return { success: true, result };
+      }
+
+      case 'concept_cooccurrence_edges': {
+        const pointerType = typeof args.pointer_type === 'string' ? args.pointer_type : undefined;
+        const shape = typeof args.shape === 'string' ? args.shape : undefined;
+        const minWeight = typeof args.min_weight === 'number' ? args.min_weight : undefined;
+        const limit = typeof args.limit === 'number' ? args.limit : undefined;
+        const edges = await getImpulseCooccurrenceEdges(
+          { pointerType, shape, minWeight, limit, orgId },
+          jwtToken,
+        );
+        return { success: true, result: { edges } };
       }
 
       case 'concept_search': {

@@ -22,6 +22,7 @@ const sourceShapeMap: Record<SourceType, string> = {
   read: 'file_content',
   cpg_embedding: 'code_pattern',
   extracted: 'extracted_data',
+  impulse_signature: 'impulse_signature',
 };
 
 /**
@@ -38,6 +39,7 @@ const sourcePriorityDefaults: Record<SourceType, number> = {
   memo: 0.4,           // Memos
   cpg_embedding: 0.3,  // Code patterns
   extracted: 0.3,      // Extracted data
+  impulse_signature: 0.5, // Impulse (pointer_type, shape) signatures
 };
 
 /**
@@ -54,6 +56,7 @@ const sourceBudgetDefaults: Record<SourceType, number> = {
   read: 3000,          // File content
   cpg_embedding: 2000, // Code patterns
   extracted: 2000,     // Extracted data
+  impulse_signature: 500, // Signatures have no body content
 };
 
 export interface CreateFromSourceParams {

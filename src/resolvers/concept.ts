@@ -36,6 +36,7 @@ function inferShape(sourceType: SourceType, explicitShape?: string): string {
     read: 'file_content',
     cpg_embedding: 'code_pattern',
     extracted: 'extracted_data',
+    impulse_signature: 'impulse_signature',
   };
 
   return shapeMap[sourceType] || 'unknown';
@@ -371,6 +372,107 @@ export async function getConceptById(
     : await surrealDB.query<Concept>(sql, { concept_id: conceptId });
 
   return results[0] || null;
+}
+
+/**
+ * Idempotent upsert of a concept keyed on a (pointer_type, shape) impulse
+ * signature. Used by the `learn-impulse-relationships` activity to materialise
+ * one concept per unique impulse signature seen in traces. Subsequent calls
+ * with the same signature return the existing concept with `created: false`.
+ *
+ * The query filters on (source_type='impulse_signature', pointer.type=pointerType,
+ * shape=shape, org_id=orgId). Signatures are scoped per-org; there is no
+ * global/public signature concept in v1.
+ */
+export async function upsertBySignature(
+  params: { pointerType: string; shape: string; orgId: string },
+  jwtToken?: string,
+): Promise<{ id: string; created: boolean }> {
+  const { pointerType, shape, orgId } = params;
+
+  const findSql = `
+    SELECT id FROM concept
+    WHERE source_type = 'impulse_signature'
+      AND pointer.type = $pointer_type
+      AND shape = $shape
+      AND org_id = $org_id
+    LIMIT 1
+  `;
+
+  const existing = jwtToken
+    ? await queryWithAuth<{ id: string }>(jwtToken, findSql, {
+        pointer_type: pointerType,
+        shape,
+        org_id: orgId,
+      })
+    : await surrealDB.query<{ id: string }>(findSql, {
+        pointer_type: pointerType,
+        shape,
+        org_id: orgId,
+      });
+
+  if (existing[0]?.id) {
+    return { id: String(existing[0].id).replace(/^concept:/, ''), created: false };
+  }
+
+  const id = `concept_${nanoid(12)}`;
+  const summary = `\`${pointerType}:${shape}\` impulse signature`;
+  const pointer = {
+    type: pointerType,
+    metadata: { signature_shape: shape },
+  };
+
+  const createSql = `
+    CREATE type::record("concept", $id) SET
+      id = $id,
+      pointer = $pointer,
+      shape = $shape,
+      summary = $summary,
+      content = NONE,
+      token_estimate = 0,
+      budget = 500,
+      source_type = 'impulse_signature',
+      priority = 0.5,
+      relevance = 0.5,
+      times_loaded = 0,
+      times_succeeded = 0,
+      times_failed = 0,
+      resolution_snapshot = NONE,
+      scope = 'org',
+      public = false,
+      org_id = $org_id
+  `;
+
+  const createParams = {
+    id,
+    pointer,
+    shape,
+    summary,
+    org_id: orgId,
+  };
+
+  const created = jwtToken
+    ? await queryWithAuth<Concept>(jwtToken, createSql, createParams)
+    : await surrealDB.query<Concept>(createSql, createParams);
+
+  const createdRow = created[0];
+  if (!createdRow) {
+    throw new Error('Failed to upsert impulse_signature concept');
+  }
+
+  logger.info('Upserted impulse_signature concept', {
+    id,
+    pointer_type: pointerType,
+    shape,
+    org_id: orgId,
+  });
+
+  lifecycleDispatcher.emit('concept:created', {
+    concept: createdRow,
+    orgId,
+  });
+
+  return { id, created: true };
 }
 
 /**

@@ -184,6 +184,8 @@ export function loadConfig(): Config {
         'relatedConcepts',
         'conceptUsageStats',
         'conceptSequence',
+        'impulseSignatureConcept',
+        'impulseCooccurrenceEdges',
       ],
     },
 

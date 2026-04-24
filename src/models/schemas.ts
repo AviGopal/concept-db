@@ -20,6 +20,7 @@ export const SourceTypeSchema = z.enum([
   'read',
   'cpg_embedding',
   'extracted',
+  'impulse_signature',
 ]);
 
 export type SourceType = z.infer<typeof SourceTypeSchema>;
