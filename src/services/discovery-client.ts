@@ -35,6 +35,12 @@ interface VesselRegistration {
   resolve_request_format?: string;
   auth_scheme?: string;
   resolve_timeout_ms?: number;
+  // Auth token source (Wave A3, 2026-04-23, forward-mode only). Mirrors the
+  // contract field on discovery-vessel's RegistrationRequest. Concept-db
+  // tenants by the caller's `$auth.org_id`, so caller_identity is the
+  // correct credential — see super-repo `docs/specs/auth-token-source-field.md`.
+  auth_token_source?: string;
+  auth_delegation_mode?: string;
 }
 
 interface RegisterResponse {
@@ -112,6 +118,15 @@ export class DiscoveryClient {
         resolve_request_format: 'pointer',
         auth_scheme: 'ApiKey',
         resolve_timeout_ms: 10000,
+        // Auth token source (Wave A3, 2026-04-23). Concept-db's
+        // PERMISSIONS clauses tenant by `$auth.org_id` from the caller's
+        // service identity, so caller_identity is the correct credential.
+        // Forward-mode delegation is the default and is harmless for
+        // caller_identity vessels (the field is meaningful for
+        // user_identity only); we advertise it explicitly anyway so
+        // downstream behavior is fully described.
+        auth_token_source: 'caller_identity',
+        auth_delegation_mode: 'forward',
       };
 
       logger.info('[Discovery] Registering vessel', {
