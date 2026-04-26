@@ -51,6 +51,13 @@ export interface TaskCompletedEvent {
     // Optional: activity-api may extend broadcasts with these fields.
     activity_id?: string;
     impulse_resolutions?: ImpulseResolutionLike[];
+    // Per-task impulse grouping. Activity-api's broadcaster forwards these
+    // from the minibob-emitted task object (snake_case canonical wire shape).
+    // Bare ID arrays — synthesized to ImpulseResolutionLike[] in
+    // `buildUsageRequestsFromTaskCompleted` before concept-ref extraction.
+    // See docs/specs/broadcaster-per-task-grouping.md.
+    input_impulse_ids?: string[];
+    output_impulse_ids?: string[];
   };
 }
 
@@ -142,7 +149,19 @@ export function buildUsageRequestsFromTaskCompleted(
   const { data } = event;
   if (!data) return [];
 
-  const conceptIds = extractConceptRefs(data.impulse_resolutions);
+  // Activity-api's broadcaster forwards bare impulse-ID arrays per-task
+  // (`input_impulse_ids` / `output_impulse_ids`). Older / future event
+  // emitters may also include the richer `impulse_resolutions` extension
+  // point. Synthesize all sources into a single `ImpulseResolutionLike[]`
+  // so `extractConceptRefs` remains the single source of truth for
+  // concept-ID detection. See docs/specs/broadcaster-per-task-grouping.md.
+  const synthesized: ImpulseResolutionLike[] = [
+    ...(data.input_impulse_ids ?? []).map((id): ImpulseResolutionLike => ({ impulse_id: id })),
+    ...(data.output_impulse_ids ?? []).map((id): ImpulseResolutionLike => ({ impulse_id: id })),
+    ...(data.impulse_resolutions ?? []),
+  ];
+
+  const conceptIds = extractConceptRefs(synthesized);
   if (conceptIds.length === 0) return [];
 
   const outcome: Outcome = data.success ? 'success' : 'failure';

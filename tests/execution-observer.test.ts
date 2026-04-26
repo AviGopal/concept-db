@@ -137,6 +137,128 @@ describe('buildUsageRequestsFromTaskCompleted', () => {
       'concept_b',
     ]);
   });
+
+  // ── broadcaster-per-task-grouping spec ──────────────────────────────────
+  // The activity-api broadcaster now forwards bare-ID arrays
+  // (`input_impulse_ids` / `output_impulse_ids`) on `task.completed`. The
+  // observer synthesizes them into `ImpulseResolutionLike[]` before
+  // extracting concept refs. These tests pin the spec contract.
+  // See docs/specs/broadcaster-per-task-grouping.md.
+
+  test('extracts concept refs from output_impulse_ids (broadcaster bare-ID arrays)', () => {
+    const event: TaskCompletedEvent = {
+      type: 'task.completed',
+      data: {
+        execution_id: 'exec_b1',
+        task_id: 'task_b1',
+        success: true,
+        output_impulse_ids: ['concept:c1', 'memo:m1'],
+      },
+    };
+    const requests = buildUsageRequestsFromTaskCompleted(event);
+    expect(requests.length).toBe(1);
+    expect(requests[0]?.concept_id).toBe('c1');
+  });
+
+  test('extracts concept refs from input_impulse_ids (broadcaster bare-ID arrays)', () => {
+    const event: TaskCompletedEvent = {
+      type: 'task.completed',
+      data: {
+        execution_id: 'exec_b2',
+        task_id: 'task_b2',
+        success: true,
+        input_impulse_ids: ['concept:in1'],
+      },
+    };
+    const requests = buildUsageRequestsFromTaskCompleted(event);
+    expect(requests.length).toBe(1);
+    expect(requests[0]?.concept_id).toBe('in1');
+  });
+
+  test('deduplicates across input_impulse_ids and output_impulse_ids', () => {
+    const event: TaskCompletedEvent = {
+      type: 'task.completed',
+      data: {
+        execution_id: 'exec_b3',
+        task_id: 'task_b3',
+        success: true,
+        input_impulse_ids: ['concept:shared', 'concept:in_only'],
+        output_impulse_ids: ['concept:shared', 'concept:out_only'],
+      },
+    };
+    const requests = buildUsageRequestsFromTaskCompleted(event);
+    expect(requests.length).toBe(3);
+    expect(requests.map((r) => r.concept_id).sort()).toEqual([
+      'in_only',
+      'out_only',
+      'shared',
+    ]);
+  });
+
+  test('merges bare-ID arrays with impulse_resolutions extension point', () => {
+    // Forward-compat: a future broadcaster might emit both. All sources
+    // should be merged and de-duplicated.
+    const event: TaskCompletedEvent = {
+      type: 'task.completed',
+      data: {
+        execution_id: 'exec_b4',
+        task_id: 'task_b4',
+        success: true,
+        input_impulse_ids: ['concept:from_bare'],
+        impulse_resolutions: [{ concept_id: 'from_richer' }],
+      },
+    };
+    const requests = buildUsageRequestsFromTaskCompleted(event);
+    expect(requests.length).toBe(2);
+    expect(requests.map((r) => r.concept_id).sort()).toEqual([
+      'from_bare',
+      'from_richer',
+    ]);
+  });
+
+  test('empty bare-ID arrays produce zero requests (no spurious calls)', () => {
+    const event: TaskCompletedEvent = {
+      type: 'task.completed',
+      data: {
+        execution_id: 'exec_b5',
+        task_id: 'task_b5',
+        success: true,
+        input_impulse_ids: [],
+        output_impulse_ids: [],
+      },
+    };
+    const requests = buildUsageRequestsFromTaskCompleted(event);
+    expect(requests).toEqual([]);
+  });
+
+  test('skips non-concept impulse refs in bare arrays', () => {
+    const event: TaskCompletedEvent = {
+      type: 'task.completed',
+      data: {
+        execution_id: 'exec_b6',
+        task_id: 'task_b6',
+        success: true,
+        output_impulse_ids: ['file:/tmp/x', 'memo:hello', 'goal:do-thing'],
+      },
+    };
+    const requests = buildUsageRequestsFromTaskCompleted(event);
+    expect(requests).toEqual([]);
+  });
+
+  test('absence of all sources preserves current behavior (no calls)', () => {
+    // Pre-fix events have no input/output_impulse_ids and no
+    // impulse_resolutions. Observer must no-op (current behavior).
+    const event: TaskCompletedEvent = {
+      type: 'task.completed',
+      data: {
+        execution_id: 'exec_b7',
+        task_id: 'task_b7',
+        success: true,
+      },
+    };
+    const requests = buildUsageRequestsFromTaskCompleted(event);
+    expect(requests).toEqual([]);
+  });
 });
 
 describe('ExecutionObserver: recordUsage dispatch', () => {
@@ -177,6 +299,41 @@ describe('ExecutionObserver: recordUsage dispatch', () => {
       outcome: 'success',
     });
     expect(firstCall?.[1]).toBe('test-org');
+  });
+
+  test('records usage from broadcaster bare-ID arrays (per-task grouping)', async () => {
+    // End-to-end dispatch test: an event in the broadcaster's post-fix wire
+    // shape should drive `recordUsage` calls, not just produce request
+    // objects. This is the contract the spec exists to fix — pre-fix the
+    // observer received the right event shape but never synthesized
+    // impulse-resolution objects from it, so recordUsage was never called.
+    const recordUsage = mock(() => Promise.resolve({}));
+    const observer = new ExecutionObserver({
+      orgId: 'broadcast-org',
+      recordUsage: recordUsage as never,
+    });
+
+    const event: TaskCompletedEvent = {
+      type: 'task.completed',
+      data: {
+        execution_id: 'exec_bcast',
+        task_id: 'task_bcast',
+        success: true,
+        activity_id: 'activity_bcast',
+        input_impulse_ids: ['concept:in_x'],
+        output_impulse_ids: ['concept:out_y'],
+      },
+    };
+
+    await (
+      observer as unknown as {
+        handleTaskCompleted(e: TaskCompletedEvent): Promise<void>;
+      }
+    ).handleTaskCompleted(event);
+
+    expect(recordUsage).toHaveBeenCalledTimes(2);
+    const concepts = recordUsage.mock.calls.map((call) => (call[0] as { concept_id: string }).concept_id).sort();
+    expect(concepts).toEqual(['in_x', 'out_y']);
   });
 
   test('swallows recordUsage failures without throwing', async () => {
