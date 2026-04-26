@@ -31,6 +31,7 @@ import { getImpulseCooccurrenceEdges, upsertEdge } from '../resolvers/edge';
 import { getUsageStats, recordUsage } from '../resolvers/usage';
 import { getSequenceNeighbors, recordSequence } from '../resolvers/sequence';
 import { createImpulse } from '../resolvers/impulse';
+import { conceptTools, type MCPTool } from '../tools/definitions';
 import {
   CreateConceptRequestSchema,
   LinkConceptsRequestSchema,
@@ -56,6 +57,10 @@ const SUPPORTED_SHAPES = [
   'conceptSignatureUpsert_write',
   'conceptUsage_write',
   'conceptSequence_write',
+  // mcpTool: discovery-to-tools bridge. Returns a ranked list of tools the
+  // vessel exposes, scored against the request's task context. See
+  // docs/specs/discovery-to-tools-bridge.md.
+  'mcpTool',
 ] as const;
 
 /**
@@ -108,6 +113,248 @@ async function emitWriteAudit(opts: {
 interface ResolveResponse {
   content: unknown;
   metadata: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// mcpTool resolver helpers (discovery-to-tools bridge).
+// See docs/specs/discovery-to-tools-bridge.md § "Resolver scoring (vessel-side)".
+// ---------------------------------------------------------------------------
+
+/**
+ * This vessel's externally-reachable base URL. Mirrors the logic in
+ * services/discovery-client.ts:getEndpoint() so the tool impulses we emit
+ * carry the same endpoint the discovery registration advertises.
+ */
+function getSelfEndpoint(): string {
+  if (process.env.VESSEL_ENDPOINT) return process.env.VESSEL_ENDPOINT;
+  const namespace = process.env.SURREALDB_NAMESPACE || 'activity-system';
+  const serviceName = process.env.SERVICE_NAME || 'concept-db';
+  return `http://${serviceName}.${namespace}.svc.cluster.local:${config.port}`;
+}
+
+/**
+ * Tokenize a string into lowercase keyword tokens. Splits on non-alphanumeric
+ * characters so `concept_link` → ["concept", "link"], `from_concept_id` →
+ * ["from", "concept", "id"]. Empty tokens are dropped.
+ */
+function tokenize(input: string | undefined | null): string[] {
+  if (!input) return [];
+  return input
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 0);
+}
+
+/**
+ * Bag-of-words overlap as a normalized score in [0, 1]. Defined as the
+ * fraction of `needle` tokens that appear in `haystack` tokens. Returns 0
+ * when `needle` is empty (no signal → no contribution).
+ */
+function keywordMatchScore(needle: string[], haystack: string[]): number {
+  if (needle.length === 0) return 0;
+  const haystackSet = new Set(haystack);
+  let hits = 0;
+  for (const tok of needle) {
+    if (haystackSet.has(tok)) hits++;
+  }
+  return hits / needle.length;
+}
+
+/**
+ * Per-tool relevance EMA. The full spec calls for tracking per-tool success
+ * rate from past usage; concept-db today doesn't have a per-tool-name usage
+ * counter (`concept_usage` is keyed on concept_id, not tool name). Default
+ * to the uninformed prior 0.5 across the board until that signal exists.
+ *
+ * TODO(discovery-to-tools-bridge): wire to per-tool EMA once a `tool_usage`
+ * table or equivalent is added. See docs/specs/discovery-to-tools-bridge.md
+ * § "Resolver scoring (vessel-side)".
+ */
+function relevanceEmaForTool(_tool: MCPTool): number {
+  return 0.5;
+}
+
+/**
+ * Scoring function per docs/specs/discovery-to-tools-bridge.md:
+ *   score = 0.4 * shape_match
+ *         + 0.3 * keyword_match
+ *         + 0.3 * (relevance_ema ?? 0.5)
+ *
+ * shape_match: today MCPTool definitions don't declare input/output shapes
+ * (the spec calls this a future small extension). We treat the shape-match
+ * term as a soft keyword match between requested shapes and the tool's
+ * name+description tokens — rough but better than 0 for cold-start.
+ *
+ * keyword_match: bag-of-words overlap between the request's goal_keywords +
+ * tokens(task_description) and the tool's name+description tokens.
+ */
+function scoreToolForContext(
+  tool: MCPTool,
+  context: {
+    goal_keywords?: string[];
+    input_shapes?: string[];
+    output_shapes?: string[];
+    task_description?: string;
+  },
+): { score: number; matched_input_shapes: string[]; matched_output_shapes: string[] } {
+  const toolTokens = [...tokenize(tool.name), ...tokenize(tool.description)];
+  const toolTokenSet = new Set(toolTokens);
+
+  const requestedInputShapes = context.input_shapes ?? [];
+  const requestedOutputShapes = context.output_shapes ?? [];
+  const allShapes = [...requestedInputShapes, ...requestedOutputShapes];
+
+  // shape_match: tokens of each requested shape against the tool's tokens.
+  // Score per shape: 1 if all of its tokens are present in the tool, else
+  // proportional. Average across requested shapes.
+  let shapeScore = 0;
+  if (allShapes.length > 0) {
+    let shapeAccum = 0;
+    for (const shape of allShapes) {
+      const shapeToks = tokenize(shape);
+      shapeAccum += keywordMatchScore(shapeToks, toolTokens);
+    }
+    shapeScore = shapeAccum / allShapes.length;
+  }
+
+  // matched_*_shapes: surface which requested shapes had >0 token overlap.
+  // Cheap signal for the consumer to disambiguate.
+  const matched_input_shapes = requestedInputShapes.filter(
+    (s) => tokenize(s).some((t) => toolTokenSet.has(t)),
+  );
+  const matched_output_shapes = requestedOutputShapes.filter(
+    (s) => tokenize(s).some((t) => toolTokenSet.has(t)),
+  );
+
+  // keyword_match: goal_keywords + task_description tokens against tool tokens.
+  const goalTokens = (context.goal_keywords ?? []).flatMap((k) => tokenize(k));
+  const descTokens = tokenize(context.task_description);
+  const queryTokens = [...goalTokens, ...descTokens];
+  const keywordScore = keywordMatchScore(queryTokens, toolTokens);
+
+  const emaScore = relevanceEmaForTool(tool);
+
+  const score =
+    0.4 * shapeScore + 0.3 * keywordScore + 0.3 * emaScore;
+
+  return { score, matched_input_shapes, matched_output_shapes };
+}
+
+interface McpToolImpulse {
+  shape: 'mcpTool';
+  vessel_id: string;
+  vessel_endpoint: string;
+  tool_name: string;
+  description: string;
+  input_schema: MCPTool['inputSchema'];
+  resolve_endpoint: string;
+  resolve_request_format: 'mcp-tool';
+  auth_scheme: 'ApiKey' | 'Bearer' | 'none';
+  relevance_score: number;
+  matched_input_shapes: string[];
+  matched_output_shapes: string[];
+}
+
+/**
+ * Build the response envelope for an mcpTool resolution. Returns matching
+ * tools sorted by relevance_score descending, capped at `limit` (default 20).
+ *
+ * Anthropic's tool-name regex is `^[a-zA-Z0-9_-]{1,64}$`; concept-db's tool
+ * names already comply, so no name rewriting needed.
+ */
+function buildMcpToolResponse(
+  pointer: {
+    context?: {
+      goal_keywords?: string[];
+      input_shapes?: string[];
+      output_shapes?: string[];
+      task_description?: string;
+    };
+    // The spec's pointer envelope nests the context under `context`, but
+    // accepts top-level fields too for callers that flatten. Both are
+    // handled below.
+    goal_keywords?: string[];
+    input_shapes?: string[];
+    output_shapes?: string[];
+    task_description?: string;
+    limit?: number;
+    min_relevance?: number;
+  },
+): ResolveResponse {
+  const ctx = {
+    goal_keywords: pointer.context?.goal_keywords ?? pointer.goal_keywords,
+    input_shapes: pointer.context?.input_shapes ?? pointer.input_shapes,
+    output_shapes: pointer.context?.output_shapes ?? pointer.output_shapes,
+    task_description:
+      pointer.context?.task_description ?? pointer.task_description,
+  };
+
+  const limit =
+    typeof pointer.limit === 'number' && pointer.limit > 0
+      ? Math.floor(pointer.limit)
+      : 20;
+  const minRelevance =
+    typeof pointer.min_relevance === 'number' ? pointer.min_relevance : 0;
+
+  const vesselId = config.discovery.vesselId;
+  const vesselEndpoint = getSelfEndpoint();
+
+  // Detect "uninformed" pointer — no context fields at all. In that case
+  // every tool scores identically (0.4*0 + 0.3*0 + 0.3*0.5 = 0.15) which
+  // ranks them all equal; we surface the full catalog (capped at limit).
+  const hasContextSignal =
+    (ctx.goal_keywords && ctx.goal_keywords.length > 0) ||
+    (ctx.input_shapes && ctx.input_shapes.length > 0) ||
+    (ctx.output_shapes && ctx.output_shapes.length > 0) ||
+    (ctx.task_description && ctx.task_description.length > 0);
+
+  const scored: McpToolImpulse[] = conceptTools
+    .map((tool): McpToolImpulse => {
+      const { score, matched_input_shapes, matched_output_shapes } =
+        scoreToolForContext(tool, ctx);
+      return {
+        shape: 'mcpTool',
+        vessel_id: vesselId,
+        vessel_endpoint: vesselEndpoint,
+        tool_name: tool.name,
+        description: tool.description,
+        input_schema: tool.inputSchema,
+        resolve_endpoint: '/mcp/tools/call',
+        resolve_request_format: 'mcp-tool',
+        auth_scheme: 'ApiKey',
+        relevance_score: score,
+        matched_input_shapes,
+        matched_output_shapes,
+      };
+    })
+    .filter((t) => t.relevance_score >= minRelevance);
+
+  // Stable sort: score desc, then name asc for deterministic ordering when
+  // scores tie (matters for cold-start, where everything is 0.15).
+  scored.sort((a, b) => {
+    if (b.relevance_score !== a.relevance_score) {
+      return b.relevance_score - a.relevance_score;
+    }
+    return a.tool_name.localeCompare(b.tool_name);
+  });
+
+  const trimmed = scored.slice(0, limit);
+
+  // Annotate the summary so the caller sees whether the resolver had context
+  // to score against; useful for debugging cold-start ranking issues.
+  const summary = hasContextSignal
+    ? `${trimmed.length} tool(s) matching context (of ${conceptTools.length} total)`
+    : `${trimmed.length} tool(s) (no context — uninformed prior)`;
+
+  return {
+    content: trimmed,
+    metadata: {
+      shape: 'mcpTool',
+      summary,
+      rowCount: trimmed.length,
+      vessel_id: vesselId,
+    },
+  };
 }
 
 /**
@@ -365,6 +612,21 @@ impulses.post('/resolve', async (c) => {
             },
           },
         };
+        break;
+      }
+
+      // ---------------------------------------------------------------
+      // mcpTool: discovery-to-tools bridge.
+      // ---------------------------------------------------------------
+      // Returns the list of tools concept-db exposes, scored against the
+      // request's task context (goal_keywords, input/output shapes, free-text
+      // task description). Each entry carries enough metadata for the
+      // consumer to dispatch the tool without per-vessel client code:
+      // vessel_endpoint + resolve_endpoint + resolve_request_format +
+      // auth_scheme. Read-only — does not mutate any tool state.
+
+      case 'mcpTool': {
+        result = buildMcpToolResponse(pointer as Parameters<typeof buildMcpToolResponse>[0]);
         break;
       }
 

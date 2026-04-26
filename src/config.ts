@@ -197,6 +197,12 @@ export function loadConfig(): Config {
         // Audit-log shape (read-only via the `impulse` table). Advertised so
         // callers can resolve audit logs by id/org without going through MCP.
         'conceptUpkeepAuditLog',
+        // mcpTool: per docs/specs/discovery-to-tools-bridge.md. Vessels that
+        // own MCP tools advertise this shape; the resolver returns a list of
+        // tool impulses scored against the request's task context. Each
+        // returned tool impulse carries the vessel binding so consumers can
+        // dispatch via /mcp/tools/call without per-vessel client code.
+        'mcpTool',
       ],
     },
 
