@@ -18,6 +18,7 @@
     "hono": "^4.0.0",
     "ioredis": "^5.3.2",
     "nanoid": "^5.0.4",
+    "onnxruntime-node": "^1.20.1",
     "surrealdb": "^2.0.2",
     "uuid": "^13.0.0",
     "zod": "^3.22.4"

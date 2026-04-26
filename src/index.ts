@@ -18,6 +18,7 @@ import { registerLifecycleHooks } from './lifecycle/hooks';
 import { startScheduler, stopScheduler, getSchedulerStatus } from './upkeep/scheduler';
 import { discoveryClient } from './services/discovery-client';
 import { ExecutionObserver } from './services/execution-observer';
+import { embeddingService } from './services/embedding';
 
 // Passive listener for activity-api execution events. Constructed at module
 // load; lifecycle is driven by startup()/shutdown().
@@ -63,6 +64,7 @@ app.get('/health', async (c) => {
         scheduler_running: status.running,
         enabled: status.enabled,
       },
+      embedding: embeddingService.getStatus(),
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -207,6 +209,83 @@ async function startup() {
     logger.info('concept-db vessel started', {
       port: config.port,
       host: config.host,
+    });
+
+    // Non-blocking: init local embedding model then optionally backfill
+    embeddingService.init().then(async () => {
+      if (!embeddingService.isReady()) return;
+
+      const backfillEnabled = process.env.DENSE_BACKFILL_ENABLED !== 'false';
+      if (!backfillEnabled) {
+        logger.info('[LocalEmbedding] Backfill disabled (DENSE_BACKFILL_ENABLED=false)');
+        return;
+      }
+
+      logger.info('[LocalEmbedding] Starting backfill for concepts without embeddings');
+      let offset = 0;
+      const batchSize = 50;
+      let totalProcessed = 0;
+
+      for (;;) {
+        let rows: any[];
+        try {
+          rows = await surrealDB.query<any>(
+            `SELECT id, content, summary FROM concept WHERE content_embedding IS NONE LIMIT $limit START $offset`,
+            { limit: batchSize, offset }
+          );
+        } catch (err) {
+          logger.warn('[LocalEmbedding] Backfill query failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+          break;
+        }
+
+        if (!rows || rows.length === 0) break;
+
+        for (const row of rows) {
+          try {
+            const rawId = typeof row.id === 'object' ? JSON.stringify(row.id) : String(row.id);
+            const plainId = rawId.replace(/^concept:/, '').replace(/[⟨⟩`"]/g, '');
+            const updates: Record<string, unknown> = {};
+            if (row.content) {
+              const vec = await embeddingService.embed(String(row.content).slice(0, 2000));
+              updates.content_embedding = Array.from(vec);
+            }
+            const summaryText = row.summary || String(row.content || '').slice(0, 200);
+            if (summaryText) {
+              const vec = await embeddingService.embed(summaryText);
+              updates.summary_embedding = Array.from(vec);
+            }
+            if (Object.keys(updates).length === 0) {
+              totalProcessed++;
+              continue;
+            }
+            const setClause = Object.keys(updates).map((k) => `${k} = $${k}`).join(', ');
+            await surrealDB.query(
+              `UPDATE type::record("concept", $id) SET ${setClause}`,
+              { id: plainId, ...updates }
+            );
+            totalProcessed++;
+            if (totalProcessed % 250 === 0) {
+              logger.info('[LocalEmbedding] Backfill progress', { totalProcessed });
+            }
+          } catch (err) {
+            logger.warn('[LocalEmbedding] Backfill row failed, skipping', {
+              id: row.id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
+        offset += batchSize;
+        if (rows.length < batchSize) break;
+      }
+
+      logger.info('[LocalEmbedding] Backfill complete', { totalProcessed });
+    }).catch((err) => {
+      logger.error('[LocalEmbedding] Unexpected error during init/backfill', {
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
 
   } catch (error) {

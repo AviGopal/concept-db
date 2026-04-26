@@ -9,6 +9,8 @@ import { nanoid } from 'nanoid';
 import { surrealDB, queryWithAuth } from '../db/surreal';
 import { logger } from '../utils/logger';
 import { lifecycleDispatcher } from '../lifecycle/dispatcher';
+import { embeddingService } from '../services/embedding';
+import { mergeByRRF } from '../utils/rrf';
 import type {
   Concept,
   CreateConceptRequest,
@@ -140,6 +142,35 @@ export async function createConcept(
     orgId,
   });
 
+  // Fire-and-forget: generate dense embeddings for the new concept
+  Promise.resolve().then(async () => {
+    if (!embeddingService.isReady()) return;
+    try {
+      const updates: Record<string, unknown> = {};
+      if (request.content) {
+        const vec = await embeddingService.embed(request.content.slice(0, 2000));
+        updates.content_embedding = Array.from(vec);
+      }
+      const summaryText = request.summary || request.content?.slice(0, 200);
+      if (summaryText) {
+        const vec = await embeddingService.embed(summaryText);
+        updates.summary_embedding = Array.from(vec);
+      }
+      if (Object.keys(updates).length === 0) return;
+      const setClause = Object.keys(updates).map((k) => `${k} = $${k}`).join(', ');
+      await surrealDB.query(
+        `UPDATE type::record("concept", $id) SET ${setClause}`,
+        { id, ...updates }
+      );
+      logger.debug('[embedding] Wrote embeddings for new concept', { id });
+    } catch (err) {
+      logger.warn('[embedding] Failed to write embeddings for new concept', {
+        id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }).catch(() => { /* swallow */ });
+
   return created;
 }
 
@@ -236,11 +267,11 @@ export async function resolveConcept(
 /**
  * Search for concepts
  *
- * When `request.query` is non-empty, uses BM25 full-text search via the
- * idx_concept_content_fts (@0@@) and idx_concept_summary_fts (@1@@) indexes.
- * summary is weighted 2× because it is a curated digest. fts_score is an
- * internal alias used only for ORDER BY — it is stripped before returning
- * Concept objects to callers.
+ * When `request.query` is non-empty:
+ * - Runs BM25 full-text search (idx_concept_content_fts / idx_concept_summary_fts)
+ * - If LocalEmbeddingService is ready, also runs dense cosine search
+ * - Results merged via Reciprocal Rank Fusion (k=60) when both succeed
+ * - Falls back to BM25-only when model is not loaded
  *
  * When `request.query` is absent the original scalar-filter path is preserved,
  * ordered by relevance DESC, created_at DESC.
@@ -248,12 +279,16 @@ export async function resolveConcept(
 export async function searchConcepts(
   request: SearchConceptsRequest,
   orgId: string,
-  jwtToken?: string
+  jwtToken?: string,
+  _decayWeights?: Map<string, number>
 ): Promise<Concept[]> {
+  const limit = request.limit || 20;
+  const offset = request.offset || 0;
+
   const params: Record<string, unknown> = {
     org_id: orgId,
-    limit: request.limit || 20,
-    offset: request.offset || 0,
+    limit,
+    offset,
   };
 
   // Scalar filters shared by both code paths
@@ -274,53 +309,164 @@ export async function searchConcepts(
     params.min_relevance = request.min_relevance;
   }
 
-  let sql: string;
-
-  if (request.query) {
-    // BM25 full-text search path
-    params.query = request.query;
-
-    const ftsCondition = '(content @0@@ $query OR summary @1@@ $query)';
-    const allConditions = [
-      'org_id = $org_id',
-      ftsCondition,
-      ...scalarConditions,
-    ];
-
-    const whereClause = `WHERE ${allConditions.join(' AND ')}`;
-
-    // fts_score is selected for ORDER BY only; callers receive Concept objects
-    // so the extra field is harmless — SurrealDB returns it in the row but the
-    // TypeScript type (Concept) does not include it, keeping the response shape
-    // unchanged.
-    sql = `
-      SELECT *,
-        search::score(0) + search::score(1) * 2.0 AS fts_score
-      FROM concept
-      ${whereClause}
-      ORDER BY fts_score DESC
-      LIMIT $limit
-      START $offset
-    `;
-  } else {
+  if (!request.query) {
     // Scalar-only path (no query term) — unchanged behaviour
     const allConditions = ['org_id = $org_id', ...scalarConditions];
     const whereClause = `WHERE ${allConditions.join(' AND ')}`;
-
-    sql = `
+    const sql = `
       SELECT * FROM concept
       ${whereClause}
       ORDER BY relevance DESC, created_at DESC
       LIMIT $limit
       START $offset
     `;
+    const results = jwtToken
+      ? await queryWithAuth<Concept>(jwtToken, sql, params)
+      : await surrealDB.query<Concept>(sql, params);
+    return results;
   }
 
-  const results = jwtToken
-    ? await queryWithAuth<Concept>(jwtToken, sql, params)
-    : await surrealDB.query<Concept>(sql, params);
+  // --------------------------------------------------------------------------
+  // Full-text search (BM25) path
+  // --------------------------------------------------------------------------
+  params.query = request.query;
 
-  return results;
+  const ftsCondition = '(content @0@@ $query OR summary @1@@ $query)';
+  const allConditions = ['org_id = $org_id', ftsCondition, ...scalarConditions];
+  const whereClause = `WHERE ${allConditions.join(' AND ')}`;
+
+  // Fetch more than `limit` so RRF has enough candidates from both lists.
+  const fetchLimit = Math.max(limit * 3, 60);
+  const ftsParams = { ...params, limit: fetchLimit, offset: 0 };
+
+  const ftsSql = `
+    SELECT *,
+      search::score(0) + search::score(1) * 2.0 AS fts_score
+    FROM concept
+    ${whereClause}
+    ORDER BY fts_score DESC
+    LIMIT $limit
+    START $offset
+  `;
+
+  const [ftsRaw, denseResults] = await Promise.all([
+    (jwtToken
+      ? queryWithAuth<Concept>(jwtToken, ftsSql, ftsParams)
+      : surrealDB.query<Concept>(ftsSql, ftsParams)
+    ).catch((err) => {
+      logger.warn('[searchConcepts] BM25 query failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [] as Concept[];
+    }),
+    searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken),
+  ]);
+
+  // Normalise concept IDs to plain strings for RRF deduplication
+  const normId = (c: Concept) =>
+    String(c.id).replace(/^concept:/, '');
+
+  const ftsResults: (Concept & { id: string })[] = (ftsRaw as any[]).map((c) => ({
+    ...c,
+    id: normId(c as Concept),
+  }));
+  const denseNorm: (Concept & { id: string })[] = denseResults.map((c) => ({
+    ...c,
+    id: normId(c),
+  }));
+
+  let merged: (Concept & { id: string })[];
+  if (denseNorm.length > 0) {
+    merged = mergeByRRF(ftsResults, denseNorm);
+    logger.info('[searchConcepts] RRF hybrid merge', {
+      ftsCount: ftsResults.length,
+      denseCount: denseNorm.length,
+      mergedCount: merged.length,
+    });
+  } else {
+    merged = ftsResults;
+  }
+
+  // Apply original offset + limit to merged list
+  return merged.slice(offset, offset + limit);
+}
+
+/**
+ * Dense semantic search for concepts using LocalEmbeddingService.
+ * Returns empty array when model is not ready.
+ */
+async function searchConceptsByDense(
+  query: string,
+  orgId: string,
+  scalarConditions: string[],
+  scalarParams: Record<string, unknown>,
+  limit: number,
+  jwtToken?: string
+): Promise<Concept[]> {
+  if (!embeddingService.isReady()) return [];
+
+  let queryVec: Float32Array;
+  try {
+    queryVec = await embeddingService.embed(query);
+  } catch (err) {
+    logger.warn('[searchConceptsByDense] embed failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+
+  try {
+    const whereClauses = [
+      'org_id = $org_id',
+      '(content_embedding IS NOT NONE OR summary_embedding IS NOT NONE)',
+      ...scalarConditions,
+    ];
+    const candidateSql = `
+      SELECT *, content_embedding, summary_embedding
+      FROM concept
+      WHERE ${whereClauses.join(' AND ')}
+    `;
+
+    const rows: any[] = jwtToken
+      ? await queryWithAuth<any>(jwtToken, candidateSql, scalarParams)
+      : await surrealDB.query<any>(candidateSql, scalarParams);
+
+    if (!rows || rows.length === 0) return [];
+
+    // Score in-process
+    const cosine = (a: Float32Array, b: number[]): number => {
+      let dot = 0;
+      for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+      return dot;
+    };
+
+    const scored = rows
+      .map((row) => {
+        let score = 0;
+        if (row.content_embedding?.length === 384) {
+          score = Math.max(score, cosine(queryVec, row.content_embedding));
+        }
+        if (row.summary_embedding?.length === 384) {
+          score = Math.max(score, cosine(queryVec, row.summary_embedding));
+        }
+        return { ...row, _dense_score: score };
+      })
+      .sort((a, b) => b._dense_score - a._dense_score)
+      .slice(0, limit);
+
+    logger.debug('[searchConceptsByDense] completed', {
+      candidateCount: rows.length,
+      resultCount: scored.length,
+      topScore: scored[0]?._dense_score ?? null,
+    });
+
+    return scored as Concept[];
+  } catch (err) {
+    logger.warn('[searchConceptsByDense] query failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
 }
 
 /**
