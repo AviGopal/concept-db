@@ -128,6 +128,52 @@ async function logResolutionSnapshot(payload: LifecyclePayload): Promise<void> {
 }
 
 /**
+ * Log impulse:created. Provides observable trace of impulse-table writes
+ * (audit logs, cached results, write-resolver acks) without coupling to the
+ * resolver that produced them.
+ */
+async function logImpulseCreated(payload: LifecyclePayload): Promise<void> {
+  const impulse = payload.impulse as { id?: string; shape?: string } | undefined;
+  if (!impulse) return;
+
+  logger.debug('Impulse created', {
+    impulse_id: impulse.id,
+    shape: impulse.shape,
+    org_id: payload.orgId,
+    persisted: payload.persisted,
+  });
+}
+
+/**
+ * Log impulse:resolved.
+ */
+async function logImpulseResolved(payload: LifecyclePayload): Promise<void> {
+  const impulse = payload.impulse as { id?: string; shape?: string } | undefined;
+  if (!impulse) return;
+
+  logger.debug('Impulse resolved', {
+    impulse_id: impulse.id,
+    shape: impulse.shape,
+    org_id: payload.orgId,
+  });
+}
+
+/**
+ * Log impulse:expired (fired by upkeep when a row past `expires_at` is
+ * deleted).
+ */
+async function logImpulseExpired(payload: LifecyclePayload): Promise<void> {
+  const impulse = payload.impulse as { id?: string; shape?: string } | undefined;
+  if (!impulse) return;
+
+  logger.debug('Impulse expired', {
+    impulse_id: impulse.id,
+    shape: impulse.shape,
+    org_id: payload.orgId,
+  });
+}
+
+/**
  * Register all lifecycle hooks
  */
 export function registerLifecycleHooks(): void {
@@ -142,6 +188,11 @@ export function registerLifecycleHooks(): void {
 
   // edge:created hooks
   lifecycleDispatcher.on('edge:created', propagateRelevanceToNeighbors);
+
+  // impulse:* hooks (observability)
+  lifecycleDispatcher.on('impulse:created', logImpulseCreated);
+  lifecycleDispatcher.on('impulse:resolved', logImpulseResolved);
+  lifecycleDispatcher.on('impulse:expired', logImpulseExpired);
 
   logger.info('Lifecycle hooks registered', {
     events: lifecycleDispatcher.getRegisteredEvents(),

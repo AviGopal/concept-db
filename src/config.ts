@@ -186,6 +186,17 @@ export function loadConfig(): Config {
         'conceptSequence',
         'impulseSignatureConcept',
         'impulseCooccurrenceEdges',
+        // Write shapes (per docs/specs/impulse-write-resolver.md). All five
+        // dispatch through `POST /v2/impulses/resolve` and emit a
+        // `conceptUpkeepAuditLog` impulse to concept-db's `impulse` table.
+        'concept_create_write',
+        'conceptLink_write',
+        'conceptSignatureUpsert_write',
+        'conceptUsage_write',
+        'conceptSequence_write',
+        // Audit-log shape (read-only via the `impulse` table). Advertised so
+        // callers can resolve audit logs by id/org without going through MCP.
+        'conceptUpkeepAuditLog',
       ],
     },
 

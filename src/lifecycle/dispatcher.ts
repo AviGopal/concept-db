@@ -14,11 +14,15 @@ export type LifecycleEvent =
   | 'concept:deleted'
   | 'edge:created'
   | 'edge:updated'
-  | 'edge:deleted';
+  | 'edge:deleted'
+  | 'impulse:created'
+  | 'impulse:resolved'
+  | 'impulse:expired';
 
 export interface LifecyclePayload {
   concept?: unknown;
   edge?: unknown;
+  impulse?: unknown;
   snapshot?: unknown;
   updates?: unknown;
   orgId: string;

@@ -19,15 +19,24 @@
 import { Hono } from 'hono';
 import { getJwtAuthFromContext } from '../middleware/jwtAuth';
 import { logger } from '../utils/logger';
+import { config } from '../config';
 import {
   resolveConcept,
   getNeighbors,
   getConceptById,
   upsertBySignature,
+  createConcept,
 } from '../resolvers/concept';
-import { getImpulseCooccurrenceEdges } from '../resolvers/edge';
-import { getUsageStats } from '../resolvers/usage';
-import { getSequenceNeighbors } from '../resolvers/sequence';
+import { getImpulseCooccurrenceEdges, upsertEdge } from '../resolvers/edge';
+import { getUsageStats, recordUsage } from '../resolvers/usage';
+import { getSequenceNeighbors, recordSequence } from '../resolvers/sequence';
+import { createImpulse } from '../resolvers/impulse';
+import {
+  CreateConceptRequestSchema,
+  LinkConceptsRequestSchema,
+  RecordUsageRequestSchema,
+  RecordSequenceRequestSchema,
+} from '../models/schemas';
 import type { EdgeType } from '../models/schemas';
 
 const impulses = new Hono();
@@ -40,7 +49,61 @@ const SUPPORTED_SHAPES = [
   'conceptSequence',
   'impulseSignatureConcept',
   'impulseCooccurrenceEdges',
+  // Write shapes — emit a `conceptUpkeepAuditLog` impulse alongside the
+  // underlying mutation. See docs/specs/impulse-write-resolver.md.
+  'concept_create_write',
+  'conceptLink_write',
+  'conceptSignatureUpsert_write',
+  'conceptUsage_write',
+  'conceptSequence_write',
 ] as const;
+
+/**
+ * Emit a `conceptUpkeepAuditLog` impulse for a write resolver call.
+ * Non-blocking — a failed audit logs but does not roll back the mutation.
+ *
+ * Returns the audit impulse id (or null on failure) so the response envelope
+ * can embed it under `auditImpulseId`.
+ */
+async function emitWriteAudit(opts: {
+  resolverId: string;
+  operation: string;
+  targetTable: string;
+  requestBody: unknown;
+  resultId?: string;
+  performedBy: string;
+  orgId: string;
+  jwtToken?: string;
+}): Promise<string | null> {
+  try {
+    const impulse = await createImpulse(
+      {
+        shape: 'conceptUpkeepAuditLog',
+        pointer: {
+          operation: opts.operation,
+          target_table: opts.targetTable,
+          target_ids: opts.resultId ? [opts.resultId] : [],
+          request_body: opts.requestBody,
+          result_id: opts.resultId ?? null,
+          performed_by: opts.performedBy,
+          org_id: opts.orgId,
+          performed_at: new Date().toISOString(),
+        },
+        summary: `${opts.resolverId} → ${opts.targetTable}${opts.resultId ? ` (${opts.resultId})` : ''}`,
+        created_by_resolver_id: opts.resolverId,
+      },
+      opts.orgId,
+      { jwtToken: opts.jwtToken },
+    );
+    return impulse.id;
+  } catch (err) {
+    logger.warn('Failed to emit write-audit impulse (non-blocking)', {
+      resolver_id: opts.resolverId,
+      error: (err as Error).message,
+    });
+    return null;
+  }
+}
 
 interface ResolveResponse {
   content: unknown;
@@ -303,6 +366,232 @@ impulses.post('/resolve', async (c) => {
           },
         };
         break;
+      }
+
+      // ---------------------------------------------------------------
+      // Write shapes
+      // ---------------------------------------------------------------
+      // Per docs/specs/impulse-write-resolver.md → "Mirror the activity-api
+      // _write pattern in concept-db. No contract changes. Add *_write cases
+      // to ... impulses.ts. Each case validates the required payload field,
+      // calls the corresponding resolver function ... and wraps the result
+      // in the standard impulse-resolve envelope with metadata.shape =
+      // <type>_result". Each emits a conceptUpkeepAuditLog impulse.
+
+      case 'concept_create_write': {
+        if (config.auth.requireAuth && !jwtAuth) {
+          return c.json({ success: false, error: 'Authentication required' }, 401);
+        }
+        const writePointer = pointer as { conceptData?: unknown };
+        if (!writePointer.conceptData) {
+          return c.json(
+            { success: false, error: 'conceptData required for concept_create_write' },
+            400,
+          );
+        }
+        try {
+          const request = CreateConceptRequestSchema.parse(writePointer.conceptData);
+          const concept = await createConcept(request, orgId, jwtToken);
+          const auditImpulseId = await emitWriteAudit({
+            resolverId: 'concept_create_write',
+            operation: 'create',
+            targetTable: 'concept',
+            requestBody: writePointer.conceptData,
+            resultId: concept.id,
+            performedBy: jwtAuth?.instanceId || jwtAuth?.orgId || 'anonymous',
+            orgId,
+            jwtToken,
+          });
+          return c.json({
+            success: true,
+            content: JSON.stringify(concept),
+            metadata: {
+              shape: 'concept_create_write_result',
+              summary: `Concept ${concept.id} created`,
+              auditImpulseId,
+            },
+          });
+        } catch (err) {
+          const e = err as Error;
+          return c.json({ success: false, error: e.message }, 400);
+        }
+      }
+
+      case 'conceptLink_write': {
+        if (config.auth.requireAuth && !jwtAuth) {
+          return c.json({ success: false, error: 'Authentication required' }, 401);
+        }
+        const writePointer = pointer as { linkData?: unknown };
+        if (!writePointer.linkData) {
+          return c.json(
+            { success: false, error: 'linkData required for conceptLink_write' },
+            400,
+          );
+        }
+        try {
+          const request = LinkConceptsRequestSchema.parse(writePointer.linkData);
+          const result = await upsertEdge(request, orgId, jwtToken);
+          const auditImpulseId = await emitWriteAudit({
+            resolverId: 'conceptLink_write',
+            operation: result.created ? 'create' : 'update',
+            targetTable: 'concept_edge',
+            requestBody: writePointer.linkData,
+            resultId: result.id,
+            performedBy: jwtAuth?.instanceId || jwtAuth?.orgId || 'anonymous',
+            orgId,
+            jwtToken,
+          });
+          return c.json({
+            success: true,
+            content: JSON.stringify(result),
+            metadata: {
+              shape: 'conceptLink_write_result',
+              summary: result.created
+                ? `Edge ${result.id} created`
+                : `Edge ${result.id} EMA-updated (weight ${result.new_weight.toFixed(3)})`,
+              auditImpulseId,
+            },
+          });
+        } catch (err) {
+          const e = err as Error;
+          return c.json({ success: false, error: e.message }, 400);
+        }
+      }
+
+      case 'conceptSignatureUpsert_write': {
+        if (config.auth.requireAuth && !jwtAuth) {
+          return c.json({ success: false, error: 'Authentication required' }, 401);
+        }
+        const writePointer = pointer as { pointer_type?: unknown; shape?: unknown };
+        if (
+          typeof writePointer.pointer_type !== 'string' ||
+          typeof writePointer.shape !== 'string'
+        ) {
+          return c.json(
+            {
+              success: false,
+              error:
+                'pointer_type (string) and shape (string) required for conceptSignatureUpsert_write',
+            },
+            400,
+          );
+        }
+        try {
+          const result = await upsertBySignature(
+            {
+              pointerType: writePointer.pointer_type,
+              shape: writePointer.shape,
+              orgId,
+            },
+            jwtToken,
+          );
+          const auditImpulseId = await emitWriteAudit({
+            resolverId: 'conceptSignatureUpsert_write',
+            operation: result.created ? 'create' : 'noop',
+            targetTable: 'concept',
+            requestBody: {
+              pointer_type: writePointer.pointer_type,
+              shape: writePointer.shape,
+            },
+            resultId: result.id,
+            performedBy: jwtAuth?.instanceId || jwtAuth?.orgId || 'anonymous',
+            orgId,
+            jwtToken,
+          });
+          return c.json({
+            success: true,
+            content: JSON.stringify(result),
+            metadata: {
+              shape: 'conceptSignatureUpsert_write_result',
+              summary: result.created
+                ? `Signature concept ${result.id} created`
+                : `Signature concept ${result.id} already existed`,
+              auditImpulseId,
+            },
+          });
+        } catch (err) {
+          const e = err as Error;
+          return c.json({ success: false, error: e.message }, 400);
+        }
+      }
+
+      case 'conceptUsage_write': {
+        if (config.auth.requireAuth && !jwtAuth) {
+          return c.json({ success: false, error: 'Authentication required' }, 401);
+        }
+        const writePointer = pointer as { usageData?: unknown };
+        if (!writePointer.usageData) {
+          return c.json(
+            { success: false, error: 'usageData required for conceptUsage_write' },
+            400,
+          );
+        }
+        try {
+          const request = RecordUsageRequestSchema.parse(writePointer.usageData);
+          const usage = await recordUsage(request, orgId, jwtToken);
+          const auditImpulseId = await emitWriteAudit({
+            resolverId: 'conceptUsage_write',
+            operation: 'create',
+            targetTable: 'concept_usage',
+            requestBody: writePointer.usageData,
+            resultId: usage.id,
+            performedBy: jwtAuth?.instanceId || jwtAuth?.orgId || 'anonymous',
+            orgId,
+            jwtToken,
+          });
+          return c.json({
+            success: true,
+            content: JSON.stringify(usage),
+            metadata: {
+              shape: 'conceptUsage_write_result',
+              summary: `Usage ${usage.id} recorded for concept ${request.concept_id}`,
+              auditImpulseId,
+            },
+          });
+        } catch (err) {
+          const e = err as Error;
+          return c.json({ success: false, error: e.message }, 400);
+        }
+      }
+
+      case 'conceptSequence_write': {
+        if (config.auth.requireAuth && !jwtAuth) {
+          return c.json({ success: false, error: 'Authentication required' }, 401);
+        }
+        const writePointer = pointer as { sequenceData?: unknown };
+        if (!writePointer.sequenceData) {
+          return c.json(
+            { success: false, error: 'sequenceData required for conceptSequence_write' },
+            400,
+          );
+        }
+        try {
+          const request = RecordSequenceRequestSchema.parse(writePointer.sequenceData);
+          const result = await recordSequence(request, orgId, jwtToken);
+          const auditImpulseId = await emitWriteAudit({
+            resolverId: 'conceptSequence_write',
+            operation: 'create',
+            targetTable: 'concept_edge',
+            requestBody: writePointer.sequenceData,
+            // No single resultId for a sequence; record the trace_id for traceability.
+            resultId: request.trace_id,
+            performedBy: jwtAuth?.instanceId || jwtAuth?.orgId || 'anonymous',
+            orgId,
+            jwtToken,
+          });
+          return c.json({
+            success: true,
+            content: JSON.stringify(result),
+            metadata: {
+              shape: 'conceptSequence_write_result',
+              summary: `Sequence recorded: ${result.edges_created} edges created, ${result.edges_skipped} updated`,
+              auditImpulseId,
+            },
+          });
+        } catch (err) {
+          const e = err as Error;
+          return c.json({ success: false, error: e.message }, 400);
+        }
       }
 
       default:
