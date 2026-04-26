@@ -235,50 +235,86 @@ export async function resolveConcept(
 
 /**
  * Search for concepts
+ *
+ * When `request.query` is non-empty, uses BM25 full-text search via the
+ * idx_concept_content_fts (@0@@) and idx_concept_summary_fts (@1@@) indexes.
+ * summary is weighted 2× because it is a curated digest. fts_score is an
+ * internal alias used only for ORDER BY — it is stripped before returning
+ * Concept objects to callers.
+ *
+ * When `request.query` is absent the original scalar-filter path is preserved,
+ * ordered by relevance DESC, created_at DESC.
  */
 export async function searchConcepts(
   request: SearchConceptsRequest,
   orgId: string,
   jwtToken?: string
 ): Promise<Concept[]> {
-  const conditions: string[] = [];
   const params: Record<string, unknown> = {
     org_id: orgId,
     limit: request.limit || 20,
     offset: request.offset || 0,
   };
 
-  if (request.query) {
-    conditions.push('(content CONTAINS $query OR summary CONTAINS $query)');
-    params.query = request.query;
-  }
+  // Scalar filters shared by both code paths
+  const scalarConditions: string[] = [];
 
   if (request.shape) {
-    conditions.push('shape = $shape');
+    scalarConditions.push('shape = $shape');
     params.shape = request.shape;
   }
 
   if (request.source_type) {
-    conditions.push('source_type = $source_type');
+    scalarConditions.push('source_type = $source_type');
     params.source_type = request.source_type;
   }
 
   if (request.min_relevance !== undefined) {
-    conditions.push('relevance >= $min_relevance');
+    scalarConditions.push('relevance >= $min_relevance');
     params.min_relevance = request.min_relevance;
   }
 
-  const whereClause = conditions.length > 0
-    ? `WHERE ${conditions.join(' AND ')}`
-    : '';
+  let sql: string;
 
-  const sql = `
-    SELECT * FROM concept
-    ${whereClause}
-    ORDER BY relevance DESC, created_at DESC
-    LIMIT $limit
-    START $offset
-  `;
+  if (request.query) {
+    // BM25 full-text search path
+    params.query = request.query;
+
+    const ftsCondition = '(content @0@@ $query OR summary @1@@ $query)';
+    const allConditions = [
+      'org_id = $org_id',
+      ftsCondition,
+      ...scalarConditions,
+    ];
+
+    const whereClause = `WHERE ${allConditions.join(' AND ')}`;
+
+    // fts_score is selected for ORDER BY only; callers receive Concept objects
+    // so the extra field is harmless — SurrealDB returns it in the row but the
+    // TypeScript type (Concept) does not include it, keeping the response shape
+    // unchanged.
+    sql = `
+      SELECT *,
+        search::score(0) + search::score(1) * 2.0 AS fts_score
+      FROM concept
+      ${whereClause}
+      ORDER BY fts_score DESC
+      LIMIT $limit
+      START $offset
+    `;
+  } else {
+    // Scalar-only path (no query term) — unchanged behaviour
+    const allConditions = ['org_id = $org_id', ...scalarConditions];
+    const whereClause = `WHERE ${allConditions.join(' AND ')}`;
+
+    sql = `
+      SELECT * FROM concept
+      ${whereClause}
+      ORDER BY relevance DESC, created_at DESC
+      LIMIT $limit
+      START $offset
+    `;
+  }
 
   const results = jwtToken
     ? await queryWithAuth<Concept>(jwtToken, sql, params)
