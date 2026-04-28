@@ -35,6 +35,7 @@ export interface Config {
   // Metabob credentials (shared across Metabob-managed services)
   metabob: {
     apiKey: string;
+    identityEndpoint: string;
   };
 
   // Passive execution observer (WebSocket client of activity-api)
@@ -158,6 +159,9 @@ export function loadConfig(): Config {
 
     metabob: {
       apiKey: process.env.METABOB_API_KEY || '',
+      identityEndpoint:
+        process.env.IDENTITY_VESSEL_URL ||
+        'http://identity-vessel.activity-system.svc.cluster.local:8080',
     },
 
     observer: {
