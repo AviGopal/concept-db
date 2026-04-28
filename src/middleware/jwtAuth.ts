@@ -127,7 +127,12 @@ async function tryIdentityValidation(
     });
 
     return {
-      jwtToken: apiKey,
+      // Use empty jwtToken so downstream callers that call queryWithAuth()
+      // fall through to surrealDB.query() (root-credentials path) rather
+      // than attempting db.authenticate(<api-key>) which always fails.
+      // The API key has already been validated by identity-vessel — the
+      // caller IS authenticated. This mirrors activity-api's L-3 pattern.
+      jwtToken: '',
       orgId: result.data.orgId,
       userId: result.data.userId,
       keyId: result.data.keyId,
