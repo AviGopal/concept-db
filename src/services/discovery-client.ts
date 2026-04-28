@@ -41,6 +41,11 @@ interface VesselRegistration {
   // correct credential — see super-repo `docs/specs/auth-token-source-field.md`.
   auth_token_source?: string;
   auth_delegation_mode?: string;
+  // Shared-infrastructure flag: when true, vessel is visible in ALL
+  // org-scoped discovery queries regardless of which orgId sent the request.
+  // Concept-db is shared infrastructure (same instance serves all tenants),
+  // so it must be reachable from any org's impulse resolution path.
+  systemVessel?: boolean;
 }
 
 interface RegisterResponse {
@@ -127,6 +132,12 @@ export class DiscoveryClient {
         // downstream behavior is fully described.
         auth_token_source: 'caller_identity',
         auth_delegation_mode: 'forward',
+        // Shared-infrastructure: concept-db serves all tenants from one
+        // instance. Marking systemVessel=true ensures it appears in
+        // org-scoped discovery queries even when the caller's orgId differs
+        // from the orgId embedded in the registration credential. Without
+        // this flag, callers from other orgs receive empty results.
+        systemVessel: true,
       };
 
       logger.info('[Discovery] Registering vessel', {
