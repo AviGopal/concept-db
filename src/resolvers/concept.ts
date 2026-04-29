@@ -340,17 +340,26 @@ export async function searchConcepts(
   const fetchLimit = Math.max(limit * 3, 60);
   const ftsParams = { ...params, limit: fetchLimit, offset: 0 };
 
-  // SurrealDB 3.x: search::score(N) requires the @@ MATCHES operator to be the
-  // FIRST condition in the WHERE clause. Any preceding AND condition (even scalar
-  // filters like org_id) prevents the planner from recognising the MATCHES context.
-  // Solution: put @@ first, then AND in other filters. Run two separate queries
-  // (one per field) since OR'd @@ expressions also break score indexing.
+  // SurrealDB 3.x: search::score(N) does not work when the search term is a
+  // bound parameter ($query). With bound params, the planner reports "no MATCHES
+  // clause found in WHERE condition" regardless of clause ordering. The term must
+  // be inlined as a string literal. We sanitize the term (strip quotes, limit
+  // length) before interpolation to prevent injection through the SurrealDB
+  // query layer (access is already auth-gated at the HTTP level).
+  //
+  // Two separate queries (one per field) because OR'd @@ expressions also fail.
   //   Query A (content, weight 1×): search::score(0) references the single @@
   //   Query B (summary, weight 2×): search::score(0) references the single @@
+  const safeQueryTerm = request.query
+    .replace(/['"\\]/g, ' ')  // strip quotes and backslashes
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);           // cap length
+
   const contentSql = `
     SELECT *, search::score(0) AS fts_score
     FROM concept
-    WHERE content @@ $query AND org_id = $org_id${scalarWhere}
+    WHERE content @@ '${safeQueryTerm}' AND org_id = $org_id${scalarWhere}
     ORDER BY fts_score DESC
     LIMIT $limit
     START $offset
@@ -359,16 +368,19 @@ export async function searchConcepts(
   const summarySql = `
     SELECT *, search::score(0) AS fts_score
     FROM concept
-    WHERE summary @@ $query AND org_id = $org_id${scalarWhere}
+    WHERE summary @@ '${safeQueryTerm}' AND org_id = $org_id${scalarWhere}
     ORDER BY fts_score DESC
     LIMIT $limit
     START $offset
   `;
 
+  // Drop the 'query' key — it is now inlined in the SQL literal, not bound.
+  const { query: _discardedQuery, ...ftsOnlyParams } = ftsParams as typeof ftsParams & { query?: string };
+
   const runQuery = (sql: string): Promise<Concept[]> =>
     (jwtToken
-      ? queryWithAuth<Concept>(jwtToken, sql, ftsParams)
-      : surrealDB.query<Concept>(sql, ftsParams)
+      ? queryWithAuth<Concept>(jwtToken, sql, ftsOnlyParams)
+      : surrealDB.query<Concept>(sql, ftsOnlyParams)
     ).catch((err) => {
       logger.warn('[searchConcepts] BM25 query failed', {
         error: err instanceof Error ? err.message : String(err),
