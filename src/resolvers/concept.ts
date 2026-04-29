@@ -422,6 +422,59 @@ export async function searchConcepts(
     }
   }
 
+  // SurrealDB 3.0 known issue: BM25 IDF statistics are computed in-memory during
+  // index writes but are not persisted to disk. After a server restart or when
+  // queried via a fresh connection, search::score(N) returns 0.0 for all rows even
+  // though the @@ operator still matches correctly. REBUILD INDEX re-indexes the
+  // text but does not restore the in-memory IDF state.
+  //
+  // Workaround: detect the all-zeros case and substitute a term-frequency proxy
+  // score computed in TypeScript. The proxy counts occurrences of each query token
+  // in the content (weight 1×) and summary (weight 2×), normalised by document
+  // length to approximate TF. This gives meaningful ordering when BM25 IDF is
+  // unavailable while preserving the real BM25 scores whenever they are non-zero.
+  const allScoresZero =
+    scoreMap.size > 0 && Array.from(scoreMap.values()).every(e => e.score === 0);
+
+  if (allScoresZero) {
+    logger.warn(
+      '[searchConcepts] BM25 scores all zero (SurrealDB 3.0 IDF not persisted) — ' +
+      'applying term-frequency proxy ranking',
+      { term: safeQueryTerm, matchCount: scoreMap.size },
+    );
+
+    const tokens = safeQueryTerm
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(t => t.length > 1);
+
+    const countOccurrences = (text: string | null | undefined, tokens: string[]): number => {
+      if (!text) return 0;
+      const lower = text.toLowerCase();
+      let count = 0;
+      for (const token of tokens) {
+        let idx = 0;
+        while ((idx = lower.indexOf(token, idx)) !== -1) {
+          count++;
+          idx += token.length;
+        }
+      }
+      return count;
+    };
+
+    for (const [id, entry] of scoreMap) {
+      const c = entry.concept as any;
+      const contentLen = Math.max(1, String(c.content ?? '').length);
+      const summaryLen = Math.max(1, String(c.summary ?? '').length);
+      const contentTf = countOccurrences(c.content, tokens) / contentLen * 1000;
+      const summaryTf = countOccurrences(c.summary, tokens) / summaryLen * 1000 * 2.0;
+      const proxyScore = contentTf + summaryTf;
+      entry.score = proxyScore;
+      c.fts_score = proxyScore;
+      scoreMap.set(id, entry);
+    }
+  }
+
   const ftsRaw = Array.from(scoreMap.values())
     .sort((a, b) => b.score - a.score)
     .map((e) => e.concept)
