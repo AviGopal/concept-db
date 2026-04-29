@@ -340,16 +340,17 @@ export async function searchConcepts(
   const fetchLimit = Math.max(limit * 3, 60);
   const ftsParams = { ...params, limit: fetchLimit, offset: 0 };
 
-  // SurrealDB 3.x requires each @@ operator to appear as a standalone top-level
-  // AND condition in the WHERE clause for search::score(N) to work correctly.
-  // Combining two @@ in an OR expression causes "no MATCHES clause found" errors.
-  // Solution: run two separate single-field BM25 queries and merge in app code.
+  // SurrealDB 3.x: search::score(N) requires the @@ MATCHES operator to be the
+  // FIRST condition in the WHERE clause. Any preceding AND condition (even scalar
+  // filters like org_id) prevents the planner from recognising the MATCHES context.
+  // Solution: put @@ first, then AND in other filters. Run two separate queries
+  // (one per field) since OR'd @@ expressions also break score indexing.
   //   Query A (content, weight 1×): search::score(0) references the single @@
   //   Query B (summary, weight 2×): search::score(0) references the single @@
   const contentSql = `
     SELECT *, search::score(0) AS fts_score
     FROM concept
-    WHERE org_id = $org_id AND content @@ $query${scalarWhere}
+    WHERE content @@ $query AND org_id = $org_id${scalarWhere}
     ORDER BY fts_score DESC
     LIMIT $limit
     START $offset
@@ -358,7 +359,7 @@ export async function searchConcepts(
   const summarySql = `
     SELECT *, search::score(0) AS fts_score
     FROM concept
-    WHERE org_id = $org_id AND summary @@ $query${scalarWhere}
+    WHERE summary @@ $query AND org_id = $org_id${scalarWhere}
     ORDER BY fts_score DESC
     LIMIT $limit
     START $offset
