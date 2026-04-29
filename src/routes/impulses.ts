@@ -39,6 +39,7 @@ import {
   RecordSequenceRequestSchema,
 } from '../models/schemas';
 import type { EdgeType } from '../models/schemas';
+import { createConceptFromSource } from '../sources/unified';
 
 const impulses = new Hono();
 
@@ -52,6 +53,10 @@ const SUPPORTED_SHAPES = [
   'impulseCooccurrenceEdges',
   // Write shapes — emit a `conceptUpkeepAuditLog` impulse alongside the
   // underlying mutation. See docs/specs/impulse-write-resolver.md.
+  // concept_write: unified from-source path (wraps POST /concepts/from-source).
+  // Pointer payload: { type: 'concept_write', source_type, content, summary?,
+  //   priority?, budget?, scope?, public?, project_id?, metadata? }
+  'concept_write',
   'concept_create_write',
   'conceptLink_write',
   'conceptSignatureUpsert_write',
@@ -639,6 +644,85 @@ impulses.post('/resolve', async (c) => {
       // calls the corresponding resolver function ... and wraps the result
       // in the standard impulse-resolve envelope with metadata.shape =
       // <type>_result". Each emits a conceptUpkeepAuditLog impulse.
+
+      // concept_write — unified from-source path. Mirrors POST /concepts/from-source.
+      // Pointer: { type: 'concept_write', source_type, content, summary?,
+      //            priority?, budget?, scope?, public?, project_id?, metadata? }
+      case 'concept_write': {
+        if (config.auth.requireAuth && !jwtAuth) {
+          return c.json({ success: false, error: 'Authentication required' }, 401);
+        }
+        const wp = pointer as {
+          source_type?: unknown;
+          content?: unknown;
+          summary?: unknown;
+          priority?: unknown;
+          budget?: unknown;
+          scope?: unknown;
+          public?: unknown;
+          project_id?: unknown;
+          metadata?: unknown;
+        };
+        if (typeof wp.source_type !== 'string' || typeof wp.content !== 'string') {
+          return c.json(
+            {
+              success: false,
+              error:
+                'source_type (string) and content (string) are required for concept_write',
+            },
+            400,
+          );
+        }
+        try {
+          const concept = await createConceptFromSource(
+            {
+              source_type: wp.source_type as Parameters<typeof createConceptFromSource>[0]['source_type'],
+              content: wp.content,
+              summary: typeof wp.summary === 'string' ? wp.summary : undefined,
+              priority: typeof wp.priority === 'number' ? wp.priority : undefined,
+              budget: typeof wp.budget === 'number' ? wp.budget : undefined,
+              scope: wp.scope as Parameters<typeof createConceptFromSource>[0]['scope'],
+              public: typeof wp.public === 'boolean' ? wp.public : undefined,
+              project_id: typeof wp.project_id === 'string' ? wp.project_id : undefined,
+              metadata:
+                wp.metadata && typeof wp.metadata === 'object' && !Array.isArray(wp.metadata)
+                  ? (wp.metadata as Record<string, unknown>)
+                  : undefined,
+            },
+            orgId,
+            jwtToken,
+          );
+          const auditImpulseId = await emitWriteAudit({
+            resolverId: 'concept_write',
+            operation: 'create',
+            targetTable: 'concept',
+            requestBody: {
+              source_type: wp.source_type,
+              content_length: (wp.content as string).length,
+              summary: wp.summary,
+            },
+            resultId: concept.id,
+            performedBy: jwtAuth?.instanceId || jwtAuth?.orgId || 'anonymous',
+            orgId,
+            jwtToken,
+          });
+          return c.json({
+            success: true,
+            content: JSON.stringify(concept),
+            metadata: {
+              shape: 'concept_write_result',
+              summary: `Concept ${concept.id} created from ${wp.source_type} source`,
+              concept_id: concept.id,
+              concept_shape: concept.shape,
+              source_type: concept.source_type,
+              auditImpulseId,
+            },
+          });
+        } catch (err) {
+          const e = err as Error;
+          return c.json({ success: false, error: e.message }, 400);
+        }
+      }
 
       case 'concept_create_write': {
         if (config.auth.requireAuth && !jwtAuth) {

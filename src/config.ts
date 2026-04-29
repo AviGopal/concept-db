@@ -190,9 +190,11 @@ export function loadConfig(): Config {
         'conceptSequence',
         'impulseSignatureConcept',
         'impulseCooccurrenceEdges',
-        // Write shapes (per docs/specs/impulse-write-resolver.md). All five
-        // dispatch through `POST /v2/impulses/resolve` and emit a
-        // `conceptUpkeepAuditLog` impulse to concept-db's `impulse` table.
+        // Write shapes (per docs/specs/impulse-write-resolver.md). All dispatch
+        // through `POST /v2/impulses/resolve` and emit a `conceptUpkeepAuditLog`
+        // impulse to concept-db's `impulse` table.
+        // concept_write: unified from-source path; preferred for MiniBob seeding.
+        'concept_write',
         'concept_create_write',
         'conceptLink_write',
         'conceptSignatureUpsert_write',
