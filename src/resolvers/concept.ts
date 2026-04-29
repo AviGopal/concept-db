@@ -331,7 +331,7 @@ export async function searchConcepts(
   // --------------------------------------------------------------------------
   params.query = request.query;
 
-  const ftsCondition = '(content @0@@ $query OR summary @1@@ $query)';
+  const ftsCondition = '(content @@ $query OR summary @@ $query)';
   const allConditions = ['org_id = $org_id', ftsCondition, ...scalarConditions];
   const whereClause = `WHERE ${allConditions.join(' AND ')}`;
 
