@@ -331,40 +331,88 @@ export async function searchConcepts(
   // --------------------------------------------------------------------------
   params.query = request.query;
 
-  const ftsCondition = '(content @@ $query OR summary @@ $query)';
-  const allConditions = ['org_id = $org_id', ftsCondition, ...scalarConditions];
-  const whereClause = `WHERE ${allConditions.join(' AND ')}`;
+  const scalarWhere =
+    scalarConditions.length > 0
+      ? ` AND ${scalarConditions.join(' AND ')}`
+      : '';
 
   // Fetch more than `limit` so RRF has enough candidates from both lists.
   const fetchLimit = Math.max(limit * 3, 60);
   const ftsParams = { ...params, limit: fetchLimit, offset: 0 };
 
-  const ftsSql = `
-    SELECT *,
-      search::score(0) + search::score(1) * 2.0 AS fts_score
+  // SurrealDB 3.x requires each @@ operator to appear as a standalone top-level
+  // AND condition in the WHERE clause for search::score(N) to work correctly.
+  // Combining two @@ in an OR expression causes "no MATCHES clause found" errors.
+  // Solution: run two separate single-field BM25 queries and merge in app code.
+  //   Query A (content, weight 1×): search::score(0) references the single @@
+  //   Query B (summary, weight 2×): search::score(0) references the single @@
+  const contentSql = `
+    SELECT *, search::score(0) AS fts_score
     FROM concept
-    ${whereClause}
+    WHERE org_id = $org_id AND content @@ $query${scalarWhere}
     ORDER BY fts_score DESC
     LIMIT $limit
     START $offset
   `;
 
-  const [ftsRaw, denseResults] = await Promise.all([
+  const summarySql = `
+    SELECT *, search::score(0) AS fts_score
+    FROM concept
+    WHERE org_id = $org_id AND summary @@ $query${scalarWhere}
+    ORDER BY fts_score DESC
+    LIMIT $limit
+    START $offset
+  `;
+
+  const runQuery = (sql: string): Promise<Concept[]> =>
     (jwtToken
-      ? queryWithAuth<Concept>(jwtToken, ftsSql, ftsParams)
-      : surrealDB.query<Concept>(ftsSql, ftsParams)
+      ? queryWithAuth<Concept>(jwtToken, sql, ftsParams)
+      : surrealDB.query<Concept>(sql, ftsParams)
     ).catch((err) => {
       logger.warn('[searchConcepts] BM25 query failed', {
         error: err instanceof Error ? err.message : String(err),
       });
       return [] as Concept[];
-    }),
+    });
+
+  const [contentRaw, summaryRaw, denseResults] = await Promise.all([
+    runQuery(contentSql),
+    runQuery(summarySql),
     searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken),
   ]);
 
-  // Normalise concept IDs to plain strings for RRF deduplication
-  const normId = (c: Concept) =>
-    String(c.id).replace(/^concept:/, '');
+  // Merge content and summary BM25 results: summary matches weighted 2×.
+  // Deduplicate by ID, combining scores for concepts that match both fields.
+  const normId = (c: Concept) => String(c.id).replace(/^concept:/, '');
+  const scoreMap = new Map<string, { concept: Concept; score: number }>();
+
+  for (const c of contentRaw as any[]) {
+    const id = normId(c as Concept);
+    const existing = scoreMap.get(id);
+    const s = Number((c as any).fts_score ?? 0);
+    if (existing) {
+      existing.score += s;
+    } else {
+      scoreMap.set(id, { concept: { ...c, fts_score: s }, score: s });
+    }
+  }
+
+  for (const c of summaryRaw as any[]) {
+    const id = normId(c as Concept);
+    const existing = scoreMap.get(id);
+    const s = Number((c as any).fts_score ?? 0) * 2.0;
+    if (existing) {
+      existing.score += s;
+      (existing.concept as any).fts_score = existing.score;
+    } else {
+      scoreMap.set(id, { concept: { ...c, fts_score: s }, score: s });
+    }
+  }
+
+  const ftsRaw = Array.from(scoreMap.values())
+    .sort((a, b) => b.score - a.score)
+    .map((e) => e.concept)
+    .slice(0, fetchLimit);
 
   const ftsResults: (Concept & { id: string })[] = (ftsRaw as any[]).map((c) => ({
     ...c,
