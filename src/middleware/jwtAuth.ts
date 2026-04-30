@@ -131,7 +131,7 @@ async function tryIdentityValidation(
       // fall through to surrealDB.query() (root-credentials path) rather
       // than attempting db.authenticate(<api-key>) which always fails.
       // The API key has already been validated by identity-vessel — the
-      // caller IS authenticated. This mirrors activity-api's L-3 pattern.
+      // caller IS authenticated. This mirrors activity-api's apikey fall-through pattern.
       jwtToken: '',
       orgId: result.data.orgId,
       userId: result.data.userId,
