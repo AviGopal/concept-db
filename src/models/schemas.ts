@@ -21,6 +21,12 @@ export const SourceTypeSchema = z.enum([
   'cpg_embedding',
   'extracted',
   'impulse_signature',
+  // Phase 22 (Autonomous Vessel Forge): concepts extracted from architecture
+  // docs for forge LLM resolvers. Queryable via
+  // GET /concepts/search?source_type=vessel_construction_pattern
+  // GET /concepts/search?source_type=impulse_activity_pattern
+  'vessel_construction_pattern',
+  'impulse_activity_pattern',
 ]);
 
 export type SourceType = z.infer<typeof SourceTypeSchema>;
