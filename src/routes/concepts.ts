@@ -85,6 +85,24 @@ concepts.post('/from-source', async (c) => {
 /**
  * Search concepts
  * GET /concepts/search
+ *
+ * Forge resolvers query this endpoint to look up vessel-construction and
+ * impulse-activity concepts when scaffolding a new vessel. The query convention
+ * is:
+ *
+ *   GET /concepts/search?source_type=vessel_construction_pattern&shape=typescript_vessel_template
+ *   GET /concepts/search?source_type=vessel_construction_pattern&shape=vessel_discovery_probe
+ *   GET /concepts/search?source_type=vessel_construction_pattern&shape=vessel_auth_blueprint
+ *
+ * These shape values correspond to the tag metadata written by the
+ * `extract-concepts-from-docs` activity when seeding from
+ * `docs/architecture/TYPESCRIPT_VESSEL_TEMPLATE.md` (tagPrefix=vessel-construction).
+ * The `shape` query param filters on the concept's `shape` field, which is
+ * derived from `source_type` in `createConceptFromSource` or set explicitly
+ * in `metadata.tag` by the forge seeding workflow.
+ *
+ * For impulse-activity concepts (tagPrefix=impulse-activity), use:
+ *   GET /concepts/search?source_type=impulse_activity_pattern&shape=impulse_activity_foundation
  */
 concepts.get('/search', async (c) => {
   const jwtAuth = getJwtAuthFromContext(c);
