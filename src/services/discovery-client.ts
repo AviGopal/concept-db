@@ -13,6 +13,8 @@
  *   - Exponential-backoff retry for transient failures.
  */
 
+import { readFileSync, existsSync } from 'fs';
+import { resolve, join } from 'path';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import packageJson from '../../package.json';
@@ -100,12 +102,31 @@ export class DiscoveryClient {
     this.registrationAttempts++;
 
     try {
+      // Phase 23 task 3.1-3.2: shape-dispatch agreement check + shape filtering.
+      const { unhandledAdvertised, orphanHandlers } = this.checkShapeDispatchAgreement();
+      if (unhandledAdvertised.length > 0) {
+        logger.error('[Discovery] Shape-dispatch agreement violation: advertised shapes missing dispatch handlers', {
+          validator_id: 'shape-dispatch-agreement',
+          unhandledAdvertised,
+        });
+      }
+      if (orphanHandlers.length > 0) {
+        logger.warn('[Discovery] Shape-dispatch agreement: dispatch handlers not advertised', {
+          validator_id: 'shape-dispatch-agreement',
+          orphanHandlers,
+        });
+      }
+      // TODO (task 3.3): emit failure_mode.type="verifier_negative" trace.
+      const safeShapes = unhandledAdvertised.length > 0
+        ? config.discovery.shapes.filter(s => !unhandledAdvertised.includes(s))
+        : config.discovery.shapes;
+
       const registration: VesselRegistration = {
         vesselId: config.discovery.vesselId,
         vesselName: config.discovery.vesselName,
         version: packageJson.version,
         endpoint: this.getEndpoint(),
-        shapes: config.discovery.shapes,
+        shapes: safeShapes,
         protocol: 'http',
         metadata: {
           environment: this.detectEnvironment(),
@@ -380,6 +401,89 @@ export class DiscoveryClient {
       return 'docker';
     }
     return 'local';
+  }
+
+  /**
+   * Check shape-dispatch agreement at startup (task 3.1-3.2, Phase 23).
+   * Mirrors packages/shape-dispatch-check/check.ts inline so this works inside
+   * Docker without the super-repo present.
+   */
+  private checkShapeDispatchAgreement(): {
+    unhandledAdvertised: string[];
+    orphanHandlers: string[];
+  } {
+    try {
+      const vesselRoot = resolve(import.meta.dir, '..', '..');
+      const configPath = join(vesselRoot, 'src', 'config.ts');
+      const dispatchPath = join(vesselRoot, 'src', 'routes', 'impulses.ts');
+
+      if (!existsSync(configPath) || !existsSync(dispatchPath)) {
+        return { unhandledAdvertised: [], orphanHandlers: [] };
+      }
+
+      const configSrc = readFileSync(configPath, 'utf8');
+      const dispatchSrc = readFileSync(dispatchPath, 'utf8');
+
+      const advertised = new Set<string>();
+      const shapeArrayPattern = /(?:shapes|advertised_shapes|ADVERTISED_SHAPES)\s*[:=]\s*\[/;
+      let inArray = false;
+      let depth = 0;
+      for (const line of configSrc.split('\n')) {
+        if (!inArray) {
+          if (shapeArrayPattern.test(line)) {
+            inArray = true;
+            for (const ch of line) {
+              if (ch === '[') depth++;
+              else if (ch === ']') depth--;
+            }
+            if (depth <= 0) inArray = false;
+            for (const m of line.matchAll(/['"]([^'"]+)['"]/g)) advertised.add(m[1]);
+          }
+          continue;
+        }
+        let nd = depth;
+        for (const ch of line) {
+          if (ch === '[') nd++;
+          else if (ch === ']') nd--;
+        }
+        if (nd <= 0) {
+          const seg = line.slice(0, line.lastIndexOf(']') >= 0 ? line.lastIndexOf(']') : line.length);
+          for (const m of seg.matchAll(/['"]([^'"]+)['"]/g)) advertised.add(m[1]);
+          inArray = false;
+          depth = 0;
+        } else {
+          depth = nd;
+          const stripped = line.replace(/\/\/.*$/, '');
+          for (const m of stripped.matchAll(/['"]([^'"]+)['"]/g)) advertised.add(m[1]);
+        }
+      }
+
+      const dispatched = new Map<string, boolean>();
+      const dlines = dispatchSrc.split('\n');
+      for (let i = 0; i < dlines.length; i++) {
+        const m = /^\s*case\s+(['"])([^'"]+)\1\s*:/.exec(dlines[i]);
+        if (!m) continue;
+        let isPrivate = false;
+        for (let j = i - 1; j >= 0; j--) {
+          const prev = dlines[j].trim();
+          if (prev === '') continue;
+          if (prev.includes('@shape-dispatch:private')) { isPrivate = true; break; }
+          if (/^case\s+['"]/.test(prev)) continue;
+          break;
+        }
+        dispatched.set(m[2], isPrivate);
+      }
+
+      const unhandledAdvertised = [...advertised].filter(s => !dispatched.has(s));
+      const orphanHandlers = [...dispatched.entries()]
+        .filter(([, priv]) => !priv)
+        .map(([s]) => s)
+        .filter(s => !advertised.has(s));
+
+      return { unhandledAdvertised, orphanHandlers };
+    } catch {
+      return { unhandledAdvertised: [], orphanHandlers: [] };
+    }
   }
 }
 
