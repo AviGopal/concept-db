@@ -34,7 +34,12 @@ bun run dev
 
 # Run tests
 bun test
+
+# Lint — includes shape-dispatch agreement check
+bun run lint
 ```
+
+**Shape contract is enforced.** `bun run lint` includes `scripts/check-shape-dispatch.ts` which verifies that every shape in `config.discovery.shapes` has a matching `case` in `src/routes/impulses.ts`. See `docs/architecture/TYPESCRIPT_VESSEL_TEMPLATE.md` §"Invariant 2" for suppression and aliasing docs.
 
 ## API Endpoints
 
