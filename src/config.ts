@@ -200,9 +200,10 @@ export function loadConfig(): Config {
         'conceptSignatureUpsert_write',
         'conceptUsage_write',
         'conceptSequence_write',
-        // Audit-log shape (read-only via the `impulse` table). Advertised so
-        // callers can resolve audit logs by id/org without going through MCP.
-        'conceptUpkeepAuditLog',
+        // conceptUpkeepAuditLog is emitted by write resolvers as a side-effect
+        // impulse; it is not resolvable via pointer dispatch (no case in
+        // routes/impulses.ts). Removed from advertised shapes to satisfy
+        // shape-dispatch-agreement invariant 2.
         // mcpTool: per docs/specs/discovery-to-tools-bridge.md. Vessels that
         // own MCP tools advertise this shape; the resolver returns a list of
         // tool impulses scored against the request's task context. Each

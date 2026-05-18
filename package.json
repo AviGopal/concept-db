@@ -10,7 +10,7 @@
     "build": "bun build src/index.ts --outdir dist --target bun",
     "apply-schema": "bun run scripts/apply-schema.ts",
     "test": "bun test",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint src --ext .ts && bun run scripts/check-shape-dispatch.ts",
     "format": "prettier --write 'src/**/*.ts'"
   },
   "dependencies": {
