@@ -575,13 +575,15 @@ describe('conceptSequence_write', () => {
 });
 
 describe('config.discovery.shapes advertises write shapes', () => {
-  test('all five write shapes plus conceptUpkeepAuditLog', async () => {
+  test('all five write shapes; conceptUpkeepAuditLog is a side-effect impulse, not advertised', async () => {
     const { config } = await import('../src/config');
     expect(config.discovery.shapes).toContain('concept_create_write');
     expect(config.discovery.shapes).toContain('conceptLink_write');
     expect(config.discovery.shapes).toContain('conceptSignatureUpsert_write');
     expect(config.discovery.shapes).toContain('conceptUsage_write');
     expect(config.discovery.shapes).toContain('conceptSequence_write');
-    expect(config.discovery.shapes).toContain('conceptUpkeepAuditLog');
+    // conceptUpkeepAuditLog is emitted as a side-effect impulse by write resolvers,
+    // not resolved via discovery — so it must NOT appear in the advertised shapes array.
+    expect(config.discovery.shapes).not.toContain('conceptUpkeepAuditLog');
   });
 });
