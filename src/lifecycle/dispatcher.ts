@@ -6,6 +6,7 @@
  */
 
 import { logger } from '../utils/logger';
+import { publishConceptEvent } from './bus';
 
 export type LifecycleEvent =
   | 'concept:created'
@@ -54,18 +55,33 @@ class LifecycleDispatcher {
   }
 
   /**
-   * Emit a lifecycle event to all registered handlers
-   * Handlers are executed asynchronously and errors are caught
+   * Emit a lifecycle event to all registered handlers AND publish to the
+   * substrate event bus (audit iter008 #3 closure / openspec
+   * 2026-05-27-neutral-emitter-lifecycle-bus). In-process handlers fire
+   * synchronously as before; the bus publish is fire-and-forget.
+   *
+   * Errors in handlers are caught. Bus publish failures are absorbed by
+   * publishConceptEvent (logged once per outage window).
    */
   emit(event: LifecycleEvent, payload: LifecyclePayload): void {
     const handlers = this.handlers.get(event) || [];
 
+    // Bus emit ALWAYS, regardless of whether any in-process handlers are
+    // registered. The neutral-emitter principle: emitters broadcast
+    // neutrally; consumers register the hooks they need. A substrate
+    // subscriber (ribosome, audit, analyzer) may be listening even when
+    // no in-process handler is.
+    publishConceptEvent(event, payload as Record<string, unknown>);
+
     if (handlers.length === 0) {
-      logger.debug('No handlers for lifecycle event', { event });
+      logger.debug('No in-process handlers for lifecycle event', { event });
       return;
     }
 
-    logger.debug('Emitting lifecycle event', { event, handler_count: handlers.length });
+    logger.debug('Emitting lifecycle event to in-process handlers', {
+      event,
+      handler_count: handlers.length,
+    });
 
     // Execute all handlers asynchronously
     for (const handler of handlers) {
