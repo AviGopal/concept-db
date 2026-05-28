@@ -7,9 +7,28 @@ import { Surreal } from 'surrealdb';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 
+// SurrealDB 2.x root signin returns a JWT with a TTL (default 1h). When that
+// token expires, subsequent queries fail with either "The token has expired"
+// or, after the session is dropped, "IAM error: Not enough permissions" — the
+// JS client does NOT automatically re-signin. We detect those errors in
+// query() and re-authenticate transparently.
+const AUTH_ERROR_FRAGMENTS = [
+  'token has expired',
+  'IAM error',
+  'Not enough permissions',
+  'No record was returned',
+  'Authentication failed',
+];
+
+function isAuthExpiryError(err: unknown): boolean {
+  const msg = (err as Error | undefined)?.message ?? '';
+  return AUTH_ERROR_FRAGMENTS.some((f) => msg.includes(f));
+}
+
 class SurrealDBClient {
   private db: Surreal | null = null;
   private connecting: Promise<void> | null = null;
+  private hasCredentials = false;
 
   async connect(): Promise<void> {
     if (this.db) {
@@ -33,14 +52,14 @@ class SurrealDBClient {
 
         // Only signin if credentials are provided and not explicitly disabled
         // Empty string, 'NONE', or missing = skip auth (for SurrealDB with auth: false)
-        const hasCredentials = config.surrealdb.username &&
+        this.hasCredentials = !!(config.surrealdb.username &&
                                config.surrealdb.password &&
                                config.surrealdb.username.trim() !== '' &&
                                config.surrealdb.password.trim() !== '' &&
                                config.surrealdb.username.toUpperCase() !== 'NONE' &&
-                               config.surrealdb.password.toUpperCase() !== 'NONE';
+                               config.surrealdb.password.toUpperCase() !== 'NONE');
 
-        if (hasCredentials) {
+        if (this.hasCredentials) {
           await this.db.signin({
             username: config.surrealdb.username,
             password: config.surrealdb.password,
@@ -82,6 +101,24 @@ class SurrealDBClient {
     return this.connecting;
   }
 
+  /**
+   * Re-signin on the existing connection. Used to refresh the root JWT after
+   * SurrealDB 2.x token expiry (default 1h). Idempotent; no-op when auth is
+   * disabled.
+   */
+  private async reauthenticate(): Promise<void> {
+    if (!this.db || !this.hasCredentials) return;
+    await this.db.signin({
+      username: config.surrealdb.username,
+      password: config.surrealdb.password,
+    });
+    await this.db.use({
+      namespace: config.surrealdb.namespace,
+      database: config.surrealdb.database,
+    });
+    logger.debug('Re-signed in to SurrealDB after token expiry');
+  }
+
   async query<T = unknown>(sql: string, params?: Record<string, unknown>): Promise<T[]> {
     await this.connect();
 
@@ -89,13 +126,42 @@ class SurrealDBClient {
       throw new Error('SurrealDB not connected');
     }
 
-    try {
+    const run = async () => {
       logger.debug('Executing SurrealDB query', { sql, params });
-      const result = await this.db.query(sql, params);
-
+      const result = await this.db!.query(sql, params);
       const firstResult = Array.isArray(result) && result.length > 0 ? result[0] : [];
       return firstResult as T[];
+    };
+
+    try {
+      return await run();
     } catch (error) {
+      // SurrealDB 2.x root signin yields a JWT with TTL. On expiry the next
+      // query fails with either "token has expired" (token still parseable)
+      // or "IAM error: Not enough permissions" (session dropped). Re-signin
+      // and retry exactly once before surfacing the error.
+      if (isAuthExpiryError(error) && this.hasCredentials) {
+        logger.info('SurrealDB auth expired; reauthenticating and retrying once', {
+          error: (error as Error).message,
+        });
+        try {
+          await this.reauthenticate();
+          return await run();
+        } catch (retryError) {
+          const rerr = retryError as Error;
+          logger.error('SurrealDB query failed after reauthenticate', {
+            sql,
+            params,
+            namespace: config.surrealdb.namespace,
+            database: config.surrealdb.database,
+            error: rerr.message,
+          });
+          throw new Error(
+            `Query failed in ${config.surrealdb.namespace}.${config.surrealdb.database}: ${rerr.message}`
+          );
+        }
+      }
+
       const err = error as Error;
       logger.error('SurrealDB query failed', {
         sql,
