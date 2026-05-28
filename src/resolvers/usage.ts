@@ -21,27 +21,33 @@ export async function recordUsage(
 ): Promise<ConceptUsage> {
   const id = `usage_${nanoid(12)}`;
 
-  // Create usage record
-  const createSql = `
-    CREATE type::record("concept_usage", $id) SET
-      id = $id,
-      concept_id = type::record("concept", $concept_id),
-      trace_id = $trace_id,
-      activity_id = $activity_id,
-      task_id = $task_id,
-      outcome = $outcome,
-      org_id = $org_id
-  `;
-
-  const params = {
+  // Create usage record. activity_id and task_id are declared `option<string>`
+  // in the schema (sql/core/001-concept-tables.surql); SurrealDB's option<T>
+  // rejects JS null. Build SET dynamically so we only assign the optional
+  // fields when the caller actually provided them — absence becomes NONE.
+  const setParts = [
+    'id = $id',
+    'concept_id = type::thing("concept", $concept_id)',
+    'trace_id = $trace_id',
+    'outcome = $outcome',
+    'org_id = $org_id',
+  ];
+  const params: Record<string, unknown> = {
     id,
     concept_id: request.concept_id,
     trace_id: request.trace_id,
-    activity_id: request.activity_id || null,
-    task_id: request.task_id || null,
     outcome: request.outcome,
     org_id: orgId,
   };
+  if (request.activity_id) {
+    setParts.push('activity_id = $activity_id');
+    params.activity_id = request.activity_id;
+  }
+  if (request.task_id) {
+    setParts.push('task_id = $task_id');
+    params.task_id = request.task_id;
+  }
+  const createSql = `CREATE type::thing("concept_usage", $id) SET ${setParts.join(', ')}`;
 
   const results = jwtToken
     ? await queryWithAuth<ConceptUsage>(jwtToken, createSql, params)
@@ -70,7 +76,7 @@ export async function recordUsage(
 /**
  * Update concept learning metrics based on usage outcome
  *
- * Uses Bayesian update: relevance = (times_succeeded + 1) / (times_loaded + 2)
+ * Uses Bayesian update: relevance = <float>(times_succeeded + 1) / (times_loaded + 2)
  */
 async function updateConceptMetrics(
   conceptId: string,
@@ -79,23 +85,30 @@ async function updateConceptMetrics(
 ): Promise<void> {
   let updateSql: string;
 
+  // Bayesian update on relevance assumes times_loaded == times_succeeded + times_failed.
+  // Without the times_loaded increment the denominator stays at 0 and the formula
+  // can produce values > 1, violating relevance's ASSERT $value <= 1f. Increment
+  // it in every branch alongside the success/failure counter.
   if (outcome === 'success') {
     updateSql = `
-      UPDATE type::record("concept", $concept_id) SET
+      UPDATE type::thing("concept", $concept_id) SET
         times_succeeded = times_succeeded + 1,
-        relevance = (times_succeeded + 2) / (times_loaded + 2)
+        times_loaded = times_loaded + 1,
+        relevance = <float>(times_succeeded + 1) / (times_loaded + 2)
     `;
   } else if (outcome === 'failure') {
     updateSql = `
-      UPDATE type::record("concept", $concept_id) SET
+      UPDATE type::thing("concept", $concept_id) SET
         times_failed = times_failed + 1,
-        relevance = (times_succeeded + 1) / (times_loaded + 2)
+        times_loaded = times_loaded + 1,
+        relevance = <float>(times_succeeded + 1) / (times_loaded + 2)
     `;
   } else {
-    // neutral - no change to success/fail counts, but recalculate relevance
+    // neutral - no change to success/fail counts, but still a "load" event.
     updateSql = `
-      UPDATE type::record("concept", $concept_id) SET
-        relevance = (times_succeeded + 1) / (times_loaded + 2)
+      UPDATE type::thing("concept", $concept_id) SET
+        times_loaded = times_loaded + 1,
+        relevance = <float>(times_succeeded + 1) / (times_loaded + 2)
     `;
   }
 
@@ -154,7 +167,7 @@ export async function getUsageHistory(
 ): Promise<ConceptUsage[]> {
   const sql = `
     SELECT * FROM concept_usage
-    WHERE concept_id = type::record("concept", $concept_id)
+    WHERE concept_id = type::thing("concept", $concept_id)
     ORDER BY recorded_at DESC
     LIMIT $limit
   `;
@@ -183,7 +196,7 @@ export async function getUsageStats(
       count(outcome = 'failure') as failures,
       count(outcome = 'neutral') as neutrals
     FROM concept_usage
-    WHERE concept_id = type::record("concept", $concept_id)
+    WHERE concept_id = type::thing("concept", $concept_id)
     GROUP ALL
   `;
 
