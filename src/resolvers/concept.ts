@@ -75,10 +75,15 @@ export async function createConcept(
   const shape = inferShape(request.source_type, request.shape);
   const tokenEstimate = estimateTokens(request.content);
 
-  const pointer = {
-    type: 'memo',
-    metadata: request.metadata || {},
-  };
+  // Prefer caller-supplied pointer (preserves path/section/etc); fall back to
+  // the legacy synthesized envelope so existing callers that pass `metadata`
+  // continue to work unchanged.
+  const pointer = request.pointer
+    ? { ...request.pointer, ...(request.metadata ? { metadata: { ...((request.pointer as { metadata?: Record<string, unknown> }).metadata ?? {}), ...request.metadata } } : {}) }
+    : {
+        type: 'memo',
+        metadata: request.metadata || {},
+      };
 
   const params: Record<string, unknown> = {
     id,
@@ -300,8 +305,20 @@ export async function searchConcepts(
   }
 
   if (request.source_type) {
-    scalarConditions.push('source_type = $source_type');
-    params.source_type = request.source_type;
+    // F26: source_type may be a single value or an array (per F26 schema
+    // extension). Use IN for arrays of >1, equality for single values.
+    if (Array.isArray(request.source_type)) {
+      if (request.source_type.length === 1) {
+        scalarConditions.push('source_type = $source_type');
+        params.source_type = request.source_type[0];
+      } else if (request.source_type.length > 1) {
+        scalarConditions.push('source_type IN $source_types');
+        params.source_types = request.source_type;
+      }
+    } else {
+      scalarConditions.push('source_type = $source_type');
+      params.source_type = request.source_type;
+    }
   }
 
   if (request.min_relevance !== undefined) {

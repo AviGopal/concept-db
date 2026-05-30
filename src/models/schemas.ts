@@ -168,6 +168,11 @@ export const CreateConceptRequestSchema = z.object({
   public: z.boolean().optional(),
   project_id: z.string().optional(),
   metadata: z.record(z.unknown()).optional(),
+  // Full pointer envelope from caller. When present, takes precedence over
+  // the synthesized {type:"memo", metadata} pointer. Callers (e.g. the
+  // metabob-mcp `concept_create` tool) use this to attach structured source
+  // references like {type, path, section}.
+  pointer: z.record(z.unknown()).optional(),
 });
 
 export type CreateConceptRequest = z.infer<typeof CreateConceptRequestSchema>;
@@ -193,7 +198,12 @@ export type LinkConceptsRequest = z.infer<typeof LinkConceptsRequestSchema>;
 export const SearchConceptsRequestSchema = z.object({
   query: z.string().optional(),
   shape: z.string().optional(),
-  source_type: SourceTypeSchema.optional(),
+  // F26: accept either a single source_type or an array. The route handler
+  // parses comma-separated query strings into an array; the resolver uses an
+  // IN-clause when given an array (>1 element) and single-value equality otherwise.
+  // This lets prime_substrate_concepts query bridge-minted impulse_signature
+  // concepts AND hand-minted memo/pattern concepts in a single call.
+  source_type: z.union([SourceTypeSchema, z.array(SourceTypeSchema)]).optional(),
   min_relevance: z.number().min(0).max(1).optional(),
   limit: z.number().optional().default(20),
   offset: z.number().optional().default(0),
