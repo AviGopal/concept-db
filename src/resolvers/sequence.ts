@@ -80,8 +80,8 @@ async function incrementSequenceWeight(
     UPDATE concept_edge SET
       weight = math::min(1.0, weight * 0.9 + 0.1),
       times_traversed = times_traversed + 1
-    WHERE from_concept = type::record("concept", $from_id)
-      AND to_concept = type::record("concept", $to_id)
+    WHERE from_concept = type::thing("concept", $from_id)
+      AND to_concept = type::thing("concept", $to_id)
       AND edge_type = 'sequence_next'
   `;
 
@@ -106,15 +106,17 @@ export async function getSequenceNeighbors(
   const conditions: string[] = [];
 
   if (direction === 'next' || direction === 'both') {
-    conditions.push(`(from_concept = type::record("concept", $concept_id) AND edge_type = 'sequence_next')`);
+    conditions.push(`(from_concept = type::thing("concept", $concept_id) AND edge_type = 'sequence_next')`);
   }
   if (direction === 'prev' || direction === 'both') {
-    conditions.push(`(to_concept = type::record("concept", $concept_id) AND edge_type = 'sequence_next')`);
+    conditions.push(`(to_concept = type::thing("concept", $concept_id) AND edge_type = 'sequence_next')`);
   }
 
+  // SurrealDB IF expression is statement-form (IF cond THEN x ELSE y END),
+  // not function-form. Use it directly here to project the opposite endpoint.
   const sql = `
     SELECT
-      IF(from_concept = type::record("concept", $concept_id), to_concept, from_concept) AS neighbor_id,
+      (IF from_concept = type::thing("concept", $concept_id) THEN to_concept ELSE from_concept END) AS neighbor_id,
       weight,
       times_traversed
     FROM concept_edge

@@ -105,7 +105,7 @@ export async function createConcept(
   }
 
   const sql = `
-    CREATE type::record("concept", $id) SET
+    CREATE type::thing("concept", $id) SET
       id = $id,
       pointer = $pointer,
       shape = $shape,
@@ -159,7 +159,7 @@ export async function createConcept(
       if (Object.keys(updates).length === 0) return;
       const setClause = Object.keys(updates).map((k) => `${k} = $${k}`).join(', ');
       await surrealDB.query(
-        `UPDATE type::record("concept", $id) SET ${setClause}`,
+        `UPDATE type::thing("concept", $id) SET ${setClause}`,
         { id, ...updates }
       );
       logger.debug('[embedding] Wrote embeddings for new concept', { id });
@@ -183,7 +183,7 @@ export async function resolveConcept(
   jwtToken?: string
 ): Promise<{ concept: Concept; neighbors?: Concept[] }> {
   // Fetch the concept
-  const fetchSql = `SELECT * FROM type::record("concept", $concept_id)`;
+  const fetchSql = `SELECT * FROM type::thing("concept", $concept_id)`;
   const concepts = jwtToken
     ? await queryWithAuth<Concept>(jwtToken, fetchSql, { concept_id: request.concept_id })
     : await surrealDB.query<Concept>(fetchSql, { concept_id: request.concept_id });
@@ -194,8 +194,8 @@ export async function resolveConcept(
   }
 
   // Get neighbor IDs - query concept_edge table directly
-  const outgoingSql = `SELECT to_concept FROM concept_edge WHERE from_concept = type::record("concept", $concept_id)`;
-  const incomingSql = `SELECT from_concept FROM concept_edge WHERE to_concept = type::record("concept", $concept_id)`;
+  const outgoingSql = `SELECT to_concept FROM concept_edge WHERE from_concept = type::thing("concept", $concept_id)`;
+  const incomingSql = `SELECT from_concept FROM concept_edge WHERE to_concept = type::thing("concept", $concept_id)`;
 
   const [outgoingResults, incomingResults] = await Promise.all([
     jwtToken
@@ -222,7 +222,7 @@ export async function resolveConcept(
 
   // Update concept with snapshot and increment times_loaded
   const updateSql = `
-    UPDATE type::record("concept", $concept_id) SET
+    UPDATE type::thing("concept", $concept_id) SET
       resolution_snapshot = $snapshot,
       times_loaded = times_loaded + 1
   `;
@@ -604,23 +604,29 @@ export async function getNeighbors(
     params.edge_types = edge_types;
   }
 
-  const queries: string[] = [];
-
-  if (direction === 'outgoing' || direction === 'both') {
-    queries.push(`
-      SELECT to_concept AS neighbor_id, * FROM concept_edge
-      WHERE from_concept = type::record("concept", $concept_id) ${edgeTypeFilter}
-    `);
+  // SurrealDB doesn't support SQL UNION; assemble a single SELECT with the
+  // appropriate WHERE clause and project `neighbor_id` as the opposite endpoint.
+  // For direction=both we compute neighbor_id via a conditional expression.
+  let whereClause: string;
+  let neighborProjection: string;
+  if (direction === 'outgoing') {
+    whereClause = `from_concept = type::thing("concept", $concept_id)`;
+    neighborProjection = 'to_concept AS neighbor_id';
+  } else if (direction === 'incoming') {
+    whereClause = `to_concept = type::thing("concept", $concept_id)`;
+    neighborProjection = 'from_concept AS neighbor_id';
+  } else {
+    // both — pick neighbor_id as whichever endpoint isn't the caller's concept
+    whereClause = `(from_concept = type::thing("concept", $concept_id) OR to_concept = type::thing("concept", $concept_id))`;
+    neighborProjection =
+      `(IF from_concept = type::thing("concept", $concept_id) THEN to_concept ELSE from_concept END) AS neighbor_id`;
   }
 
-  if (direction === 'incoming' || direction === 'both') {
-    queries.push(`
-      SELECT from_concept AS neighbor_id, * FROM concept_edge
-      WHERE to_concept = type::record("concept", $concept_id) ${edgeTypeFilter}
-    `);
-  }
-
-  const sql = queries.join(' UNION ') + ` LIMIT $limit`;
+  const sql = `
+    SELECT ${neighborProjection}, * FROM concept_edge
+    WHERE ${whereClause} ${edgeTypeFilter}
+    LIMIT $limit
+  `;
 
   const edges = jwtToken
     ? await queryWithAuth<ConceptEdge & { neighbor_id: string }>(jwtToken, sql, params)
@@ -632,17 +638,20 @@ export async function getNeighbors(
     return [];
   }
 
-  const conceptsSql = `SELECT * FROM concept WHERE id IN $ids`;
+  // `id` on concept is a record link; equality against a plain string never matches.
+  // Compare via meta::id() so the bare ids from neighborIds line up.
+  const conceptsSql = `SELECT * FROM concept WHERE meta::id(id) IN $ids`;
   const concepts = jwtToken
     ? await queryWithAuth<Concept>(jwtToken, conceptsSql, { ids: neighborIds })
     : await surrealDB.query<Concept>(conceptsSql, { ids: neighborIds });
 
-  const conceptMap = new Map(concepts.map(c => [c.id, c]));
+  // Key the map by bare id (stripped of the "concept:" prefix and any wrapping)
+  const conceptMap = new Map(concepts.map(c => [String(c.id).replace(/^concept:/, '').replace(/^⟨|⟩$/g, ''), c]));
 
   const result: { concept: Concept; edge: ConceptEdge }[] = [];
 
   for (const edge of edges) {
-    const neighborId = String(edge.neighbor_id).replace(/^concept:/, '');
+    const neighborId = String(edge.neighbor_id).replace(/^concept:/, '').replace(/^⟨|⟩$/g, '');
     const concept = conceptMap.get(neighborId);
     if (concept) {
       // Extract just the ConceptEdge fields, excluding neighbor_id
@@ -662,7 +671,7 @@ export async function getConceptById(
   orgId: string,
   jwtToken?: string
 ): Promise<Concept | null> {
-  const sql = `SELECT * FROM type::record("concept", $concept_id)`;
+  const sql = `SELECT * FROM type::thing("concept", $concept_id)`;
   const results = jwtToken
     ? await queryWithAuth<Concept>(jwtToken, sql, { concept_id: conceptId })
     : await surrealDB.query<Concept>(sql, { concept_id: conceptId });
@@ -719,7 +728,7 @@ export async function upsertBySignature(
   };
 
   const createSql = `
-    CREATE type::record("concept", $id) SET
+    CREATE type::thing("concept", $id) SET
       id = $id,
       pointer = $pointer,
       shape = $shape,
@@ -812,7 +821,7 @@ export async function updateConcept(
     return existing;
   }
 
-  const sql = `UPDATE type::record("concept", $concept_id) SET ${setClauses.join(', ')}`;
+  const sql = `UPDATE type::thing("concept", $concept_id) SET ${setClauses.join(', ')}`;
   const results = jwtToken
     ? await queryWithAuth<Concept>(jwtToken, sql, params)
     : await surrealDB.query<Concept>(sql, params);
