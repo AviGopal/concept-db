@@ -121,10 +121,16 @@ concepts.get('/search', async (c) => {
     const limit = c.req.query('limit');
     const offset = c.req.query('offset');
 
+    // F26: split comma-separated source_type into an array. Single value
+    // (no comma) passes through unchanged; multiple values become an array.
+    const parsedSourceType = sourceType?.includes(',')
+      ? sourceType.split(',').map((s) => s.trim()).filter(Boolean)
+      : sourceType;
+
     const request = SearchConceptsRequestSchema.parse({
       query,
       shape,
-      source_type: sourceType,
+      source_type: parsedSourceType,
       min_relevance: minRelevance ? parseFloat(minRelevance) : undefined,
       limit: limit ? parseInt(limit) : undefined,
       offset: offset ? parseInt(offset) : undefined,
