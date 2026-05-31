@@ -386,7 +386,11 @@ impulses.post('/resolve', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
 
-  const pointer = body?.pointer;
+  // Accept both forms (vessel_resolve_handler_dual_form, concept_y-CPpfVcAhL0):
+  //   flat:    { pointer: { type, ... } }
+  //   wrapped: { impulse: { pointer: { type, ... } } }  ← compliant impulse-contract
+  // Mirrors goal-host-vessel/src/index.ts handleResolve.
+  const pointer = body?.impulse?.pointer ?? body?.pointer;
   if (!pointer || typeof pointer !== 'object') {
     return c.json({ error: 'Missing required field: pointer' }, 400);
   }

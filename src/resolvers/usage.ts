@@ -9,7 +9,23 @@ import { nanoid } from 'nanoid';
 import { surrealDB, queryWithAuth } from '../db/surreal';
 import { logger } from '../utils/logger';
 import { config } from '../config';
+import { normalizeConceptId } from '../services/passive-usage';
 import type { RecordUsageRequest, ConceptUsage, Outcome } from '../models/schemas';
+
+/**
+ * Canonicalise a caller-supplied concept id before SurrealDB lookup.
+ * Concept ids are stored as `concept:concept_<nanoid>` records — i.e.
+ * the bare id is `concept_<nanoid>`. Callers sometimes strip the
+ * `concept_` segment (because the MCP `concept_usage_stats` input
+ * schema says "without the 'concept:' prefix" — ambiguous wording).
+ * Without normalisation the `type::thing("concept", $id)` lookup
+ * builds the wrong record id and rows appear missing. Fall back to
+ * the raw input if normalisation returns null so empty strings still
+ * surface as 400s rather than as silent prefix injections.
+ */
+function canonical(id: string): string {
+  return normalizeConceptId(id) ?? id;
+}
 
 /**
  * Record concept usage in an execution trace
@@ -34,7 +50,7 @@ export async function recordUsage(
   ];
   const params: Record<string, unknown> = {
     id,
-    concept_id: request.concept_id,
+    concept_id: canonical(request.concept_id),
     trace_id: request.trace_id,
     outcome: request.outcome,
     org_id: orgId,
@@ -59,10 +75,10 @@ export async function recordUsage(
   }
 
   // Update concept learning metrics
-  await updateConceptMetrics(request.concept_id, request.outcome, jwtToken);
+  await updateConceptMetrics(canonical(request.concept_id), request.outcome, jwtToken);
 
   // Forward to activity API for impulse relevance tracking
-  await forwardToActivityApi(request, orgId);
+  await forwardToActivityApi({ ...request, concept_id: canonical(request.concept_id) }, orgId);
 
   logger.info('Recorded concept usage', {
     concept_id: request.concept_id,
@@ -172,9 +188,10 @@ export async function getUsageHistory(
     LIMIT $limit
   `;
 
+  const normalized = canonical(conceptId);
   return jwtToken
-    ? await queryWithAuth<ConceptUsage>(jwtToken, sql, { concept_id: conceptId, limit })
-    : await surrealDB.query<ConceptUsage>(sql, { concept_id: conceptId, limit });
+    ? await queryWithAuth<ConceptUsage>(jwtToken, sql, { concept_id: normalized, limit })
+    : await surrealDB.query<ConceptUsage>(sql, { concept_id: normalized, limit });
 }
 
 /**
@@ -200,12 +217,13 @@ export async function getUsageStats(
     GROUP ALL
   `;
 
+  const normalized = canonical(conceptId);
   const results = jwtToken
     ? await queryWithAuth<{ total: number; successes: number; failures: number; neutrals: number }>(
-        jwtToken, sql, { concept_id: conceptId }
+        jwtToken, sql, { concept_id: normalized }
       )
     : await surrealDB.query<{ total: number; successes: number; failures: number; neutrals: number }>(
-        sql, { concept_id: conceptId }
+        sql, { concept_id: normalized }
       );
 
   const stats = results[0] || { total: 0, successes: 0, failures: 0, neutrals: 0 };

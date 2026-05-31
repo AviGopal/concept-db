@@ -29,11 +29,22 @@ import type { Concept } from '../models/schemas';
  * characters. Returns the bare id (e.g. `concept_xkrH3DvKplQd`) that
  * `concept_usage` rows + `recordUsage` expect, or null if `rawId` is
  * empty or not a string.
+ *
+ * Also tolerates callers that strip `concept_` (because the MCP
+ * `concept_usage_stats` input schema says "without the 'concept:'
+ * prefix" — ambiguous, since real ids are `concept_<nanoid>`). When
+ * the input lacks the `concept_` prefix, we prepend it so the
+ * downstream `type::thing("concept", $id)` lookup produces the
+ * canonical `concept:concept_<nanoid>` record id that matches stored
+ * rows.
  */
 export function normalizeConceptId(rawId: unknown): string | null {
   if (typeof rawId !== 'string' || rawId.length === 0) return null;
   const stripped = rawId.replace(/^concept:/, '').replace(/^⟨|⟩$/g, '');
-  return stripped.length > 0 ? stripped : null;
+  if (stripped.length === 0) return null;
+  // Real concept ids start with `concept_`. If the caller already
+  // gave us one, we're done. Otherwise, prepend it.
+  return stripped.startsWith('concept_') ? stripped : `concept_${stripped}`;
 }
 
 /**
