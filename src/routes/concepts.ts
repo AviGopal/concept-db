@@ -20,6 +20,8 @@ import {
 import { createEdge, getEdgesForConcept } from '../resolvers/edge';
 import { recordUsage, getUsageHistory, getUsageStats } from '../resolvers/usage';
 import { recordSequence, getSequenceNeighbors } from '../resolvers/sequence';
+import { recordPassiveUsageForResults } from '../services/passive-usage';
+import type { Concept } from '../models/schemas';
 import { createConceptFromSource } from '../sources/unified';
 import {
   CreateConceptRequestSchema,
@@ -137,6 +139,10 @@ concepts.get('/search', async (c) => {
     });
 
     const results = await searchConcepts(request, orgId, jwtAuth?.jwtToken);
+    // Passive load event: every surfaced concept was loaded into the
+    // consumer's reasoning context. Fire-and-forget; never blocks the
+    // response. See `services/passive-usage.ts` for rationale.
+    recordPassiveUsageForResults('rest_search', results, orgId, jwtAuth?.jwtToken);
     return c.json({ concepts: results, count: results.length });
   } catch (error) {
     const err = error as Error;
@@ -302,6 +308,12 @@ concepts.get('/:id/neighbors', async (c) => {
     });
 
     const neighbors = await getNeighbors(request, orgId, jwtAuth?.jwtToken);
+    // Passive load event for each surfaced neighbor concept. Mirrors the
+    // search path; see `services/passive-usage.ts`.
+    const neighborConcepts = (neighbors as Array<{ concept?: Concept }>)
+      .map((n) => n?.concept)
+      .filter((c): c is Concept => Boolean(c));
+    recordPassiveUsageForResults('rest_neighbors', neighborConcepts, orgId, jwtAuth?.jwtToken);
     return c.json({ neighbors });
   } catch (error) {
     const err = error as Error;

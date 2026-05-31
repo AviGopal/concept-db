@@ -15,6 +15,8 @@ import { upsertEdge, getImpulseCooccurrenceEdges } from '../resolvers/edge';
 import { upsertBySignature } from '../resolvers/concept';
 import { recordUsage } from '../resolvers/usage';
 import { recordSequence } from '../resolvers/sequence';
+import { recordPassiveUsageForResults } from '../services/passive-usage';
+import type { Concept } from '../models/schemas';
 import {
   CreateConceptRequestSchema,
   ResolveConceptRequestSchema,
@@ -93,12 +95,20 @@ export async function handleToolCall(
       case 'concept_search': {
         const request = SearchConceptsRequestSchema.parse(args);
         const concepts = await searchConcepts(request, orgId, jwtToken);
+        recordPassiveUsageForResults('concept_search', concepts, orgId, jwtToken);
         return { success: true, result: concepts };
       }
 
       case 'concept_neighbors': {
         const request = GetNeighborsRequestSchema.parse(args);
         const neighbors = await getNeighbors(request, orgId, jwtToken);
+        // `getNeighbors` returns one entry per edge; each entry has a
+        // `.concept` field with the neighbor concept itself. Surface those
+        // as the load events.
+        const neighborConcepts = (neighbors as Array<{ concept?: Concept }>)
+          .map((n) => n?.concept)
+          .filter((c): c is Concept => Boolean(c));
+        recordPassiveUsageForResults('concept_neighbors', neighborConcepts, orgId, jwtToken);
         return { success: true, result: neighbors };
       }
 
