@@ -96,7 +96,21 @@ export async function handleToolCall(
         const request = SearchConceptsRequestSchema.parse(args);
         const concepts = await searchConcepts(request, orgId, jwtToken);
         recordPassiveUsageForResults('concept_search', concepts, orgId, jwtToken);
-        return { success: true, result: concepts };
+        // F27 (2026-05-30): see routes/concepts.ts for rationale. MCP callers
+        // never need the raw float vectors; embeddings would balloon LLM
+        // prompts that interpolate the tool output. Pass `include_embeddings:true`
+        // in args to opt in.
+        const includeEmbeddings = args.include_embeddings === true;
+        const projected = includeEmbeddings
+          ? concepts
+          : concepts.map((c) => {
+              const { content_embedding: _ce, summary_embedding: _se, ...rest } = c as Concept & {
+                content_embedding?: unknown;
+                summary_embedding?: unknown;
+              };
+              return rest;
+            });
+        return { success: true, result: projected };
       }
 
       case 'concept_neighbors': {

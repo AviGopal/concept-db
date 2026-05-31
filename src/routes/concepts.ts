@@ -20,7 +20,7 @@ import {
 import { createEdge, getEdgesForConcept } from '../resolvers/edge';
 import { recordUsage, getUsageHistory, getUsageStats } from '../resolvers/usage';
 import { recordSequence, getSequenceNeighbors } from '../resolvers/sequence';
-import { recordPassiveUsageForResults } from '../services/passive-usage';
+import { recordPassiveUsageForResults, normalizeConceptId } from '../services/passive-usage';
 import type { Concept } from '../models/schemas';
 import { createConceptFromSource } from '../sources/unified';
 import {
@@ -143,7 +143,26 @@ concepts.get('/search', async (c) => {
     // consumer's reasoning context. Fire-and-forget; never blocks the
     // response. See `services/passive-usage.ts` for rationale.
     recordPassiveUsageForResults('rest_search', results, orgId, jwtAuth?.jwtToken);
-    return c.json({ concepts: results, count: results.length });
+
+    // F27 (2026-05-30): strip embedding vectors from REST responses by
+    // default. Each 384-dim float vector serializes to ~8KB; concepts carry
+    // both content_embedding and summary_embedding (~16KB/concept). With a
+    // limit of 15 this added ~240KB of pure noise per response, which the
+    // drafter chain (draft-gap-closing-activity) blew up to 200K+ LLM tokens
+    // via {{prime_substrate_concepts_text}} interpolation in two prompts.
+    // Embeddings are only meaningful for similarity math (already executed
+    // server-side); no REST consumer needs them. Set `embeddings=1` to opt in.
+    const includeEmbeddings = c.req.query('embeddings') === '1';
+    const projected = includeEmbeddings
+      ? results
+      : results.map((r) => {
+          const { content_embedding: _ce, summary_embedding: _se, ...rest } = r as Concept & {
+            content_embedding?: unknown;
+            summary_embedding?: unknown;
+          };
+          return rest;
+        });
+    return c.json({ concepts: projected, count: projected.length });
   } catch (error) {
     const err = error as Error;
     logger.error('Search failed', { error: err.message });
@@ -211,7 +230,7 @@ concepts.get('/:id', async (c) => {
   }
 
   const orgId = jwtAuth?.orgId || 'default';
-  const conceptId = c.req.param('id');
+  const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
 
   try {
     const concept = await getConceptById(conceptId, orgId, jwtAuth?.jwtToken);
@@ -238,7 +257,7 @@ concepts.post('/:id/resolve', async (c) => {
   }
 
   const orgId = jwtAuth?.orgId || 'default';
-  const conceptId = c.req.param('id');
+  const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
 
   try {
     const body = await c.req.json().catch(() => ({}));
@@ -268,7 +287,7 @@ concepts.patch('/:id', async (c) => {
   }
 
   const orgId = jwtAuth?.orgId || 'default';
-  const conceptId = c.req.param('id');
+  const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
 
   try {
     const body = await c.req.json();
@@ -293,7 +312,7 @@ concepts.get('/:id/neighbors', async (c) => {
   }
 
   const orgId = jwtAuth?.orgId || 'default';
-  const conceptId = c.req.param('id');
+  const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
 
   try {
     const direction = c.req.query('direction') || 'both';
@@ -333,7 +352,7 @@ concepts.get('/:id/edges', async (c) => {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
-  const conceptId = c.req.param('id');
+  const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
   const direction = (c.req.query('direction') || 'both') as 'outgoing' | 'incoming' | 'both';
 
   try {
@@ -358,7 +377,8 @@ concepts.post('/:id/link', async (c) => {
   }
 
   const orgId = jwtAuth?.orgId || 'default';
-  const fromConceptId = c.req.param('id');
+  const rawFromId = c.req.param('id');
+  const fromConceptId = normalizeConceptId(rawFromId) ?? rawFromId;
 
   try {
     const body = await c.req.json();
@@ -388,7 +408,7 @@ concepts.post('/:id/usage', async (c) => {
   }
 
   const orgId = jwtAuth?.orgId || 'default';
-  const conceptId = c.req.param('id');
+  const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
 
   try {
     const body = await c.req.json();
@@ -417,7 +437,7 @@ concepts.get('/:id/usage', async (c) => {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
-  const conceptId = c.req.param('id');
+  const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
   const limit = c.req.query('limit');
 
   try {
@@ -441,7 +461,7 @@ concepts.get('/:id/stats', async (c) => {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
-  const conceptId = c.req.param('id');
+  const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
 
   try {
     const stats = await getUsageStats(conceptId, jwtAuth?.jwtToken);
@@ -464,7 +484,7 @@ concepts.get('/:id/sequence', async (c) => {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
-  const conceptId = c.req.param('id');
+  const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
   const direction = (c.req.query('direction') || 'next') as 'next' | 'prev' | 'both';
   const limit = c.req.query('limit');
 
