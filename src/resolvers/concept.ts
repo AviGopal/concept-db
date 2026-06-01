@@ -11,6 +11,7 @@ import { logger } from '../utils/logger';
 import { lifecycleDispatcher } from '../lifecycle/dispatcher';
 import { embeddingService } from '../services/embedding';
 import { mergeByRRF } from '../utils/rrf';
+import { normalizeConceptId } from '../services/passive-usage';
 import type {
   Concept,
   CreateConceptRequest,
@@ -187,11 +188,18 @@ export async function resolveConcept(
   orgId: string,
   jwtToken?: string
 ): Promise<{ concept: Concept; neighbors?: Concept[] }> {
+  // Normalize id so callers may pass any of: `X`, `concept_X`,
+  // `concept:concept_X`, or `concept:⟨concept_X⟩`. The downstream
+  // `type::thing("concept", $id)` requires the bare canonical
+  // `concept_<nanoid>` form; otherwise the lookup misses and yields
+  // a spurious "Concept not found" / wrapped-null response.
+  const normalizedId = normalizeConceptId(request.concept_id) ?? request.concept_id;
+
   // Fetch the concept
   const fetchSql = `SELECT * FROM type::thing("concept", $concept_id)`;
   const concepts = jwtToken
-    ? await queryWithAuth<Concept>(jwtToken, fetchSql, { concept_id: request.concept_id })
-    : await surrealDB.query<Concept>(fetchSql, { concept_id: request.concept_id });
+    ? await queryWithAuth<Concept>(jwtToken, fetchSql, { concept_id: normalizedId })
+    : await surrealDB.query<Concept>(fetchSql, { concept_id: normalizedId });
 
   const concept = concepts[0];
   if (!concept) {
@@ -204,11 +212,11 @@ export async function resolveConcept(
 
   const [outgoingResults, incomingResults] = await Promise.all([
     jwtToken
-      ? queryWithAuth<{ to_concept: string }>(jwtToken, outgoingSql, { concept_id: request.concept_id })
-      : surrealDB.query<{ to_concept: string }>(outgoingSql, { concept_id: request.concept_id }),
+      ? queryWithAuth<{ to_concept: string }>(jwtToken, outgoingSql, { concept_id: normalizedId })
+      : surrealDB.query<{ to_concept: string }>(outgoingSql, { concept_id: normalizedId }),
     jwtToken
-      ? queryWithAuth<{ from_concept: string }>(jwtToken, incomingSql, { concept_id: request.concept_id })
-      : surrealDB.query<{ from_concept: string }>(incomingSql, { concept_id: request.concept_id }),
+      ? queryWithAuth<{ from_concept: string }>(jwtToken, incomingSql, { concept_id: normalizedId })
+      : surrealDB.query<{ from_concept: string }>(incomingSql, { concept_id: normalizedId }),
   ]);
 
   const neighborIds = [
@@ -234,11 +242,11 @@ export async function resolveConcept(
 
   const updateResults = jwtToken
     ? await queryWithAuth<Concept>(jwtToken, updateSql, {
-        concept_id: request.concept_id,
+        concept_id: normalizedId,
         snapshot: resolutionSnapshot,
       })
     : await surrealDB.query<Concept>(updateSql, {
-        concept_id: request.concept_id,
+        concept_id: normalizedId,
         snapshot: resolutionSnapshot,
       });
 
@@ -688,10 +696,13 @@ export async function getConceptById(
   orgId: string,
   jwtToken?: string
 ): Promise<Concept | null> {
+  // Normalize at the resolver boundary — accept any of `X`, `concept_X`,
+  // `concept:concept_X`, `concept:⟨concept_X⟩`. See normalizeConceptId.
+  const id = normalizeConceptId(conceptId) ?? conceptId;
   const sql = `SELECT * FROM type::thing("concept", $concept_id)`;
   const results = jwtToken
-    ? await queryWithAuth<Concept>(jwtToken, sql, { concept_id: conceptId })
-    : await surrealDB.query<Concept>(sql, { concept_id: conceptId });
+    ? await queryWithAuth<Concept>(jwtToken, sql, { concept_id: id })
+    : await surrealDB.query<Concept>(sql, { concept_id: id });
 
   return results[0] || null;
 }
