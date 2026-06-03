@@ -76,6 +76,17 @@ export async function createConcept(
   const shape = inferShape(request.source_type, request.shape);
   const tokenEstimate = estimateTokens(request.content);
 
+  // Dedup: return existing concept if shape+source_type+content match exactly within org
+  const dedupSql = `SELECT * FROM concept WHERE shape = $shape AND source_type = $source_type AND content = $content AND org_id = $org_id LIMIT 1`;
+  const dedupParams = { shape, source_type: request.source_type, content: request.content, org_id: orgId };
+  const dedupResults = jwtToken
+    ? await queryWithAuth<Concept>(jwtToken, dedupSql, dedupParams)
+    : await surrealDB.query<Concept>(dedupSql, dedupParams);
+  if (dedupResults[0]) {
+    logger.info('concept_create dedup hit — returning existing', { existing_id: dedupResults[0].id, shape, source_type: request.source_type, org_id: orgId });
+    return dedupResults[0];
+  }
+
   // Prefer caller-supplied pointer (preserves path/section/etc); fall back to
   // the legacy synthesized envelope so existing callers that pass `metadata`
   // continue to work unchanged.
