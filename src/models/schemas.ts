@@ -27,6 +27,17 @@ export const SourceTypeSchema = z.enum([
   // GET /concepts/search?source_type=impulse_activity_pattern
   'vessel_construction_pattern',
   'impulse_activity_pattern',
+  // Pre-lift bootstrap (2026-06-03, openspec change
+  // 2026-06-03-pre-lift-bootstrap-and-architectural-aware-loop):
+  // Architectural pattern / principle concepts. Foundation-doc sections and
+  // operator-articulated insights from session findings are stored under this
+  // source_type so the four horizon detectors
+  // (vessel_responsibility_audit, vessel_architecture_pattern_scan,
+  //  activity_lifecycle_audit, resolver_distribution_audit)
+  // can derive check predicates from concept-db rather than encoding them in
+  // resolver source. Adding a new principle = adding a concept; detectors
+  // pick up the new principle on the next dispatch.
+  'architectural_pattern_principle',
 ]);
 
 export type SourceType = z.infer<typeof SourceTypeSchema>;

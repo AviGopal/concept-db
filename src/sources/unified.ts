@@ -23,6 +23,9 @@ const sourceShapeMap: Record<SourceType, string> = {
   cpg_embedding: 'code_pattern',
   extracted: 'extracted_data',
   impulse_signature: 'impulse_signature',
+  vessel_construction_pattern: 'vessel_construction_pattern',
+  impulse_activity_pattern: 'impulse_activity_pattern',
+  architectural_pattern_principle: 'architectural_pattern_principle',
 };
 
 /**
@@ -40,6 +43,9 @@ const sourcePriorityDefaults: Record<SourceType, number> = {
   cpg_embedding: 0.3,  // Code patterns
   extracted: 0.3,      // Extracted data
   impulse_signature: 0.5, // Impulse (pointer_type, shape) signatures
+  vessel_construction_pattern: 0.6, // Substrate-curated vessel patterns
+  impulse_activity_pattern: 0.6,    // Substrate-curated activity patterns
+  architectural_pattern_principle: 0.7, // Foundation-doc principles drive detectors
 };
 
 /**
@@ -57,6 +63,9 @@ const sourceBudgetDefaults: Record<SourceType, number> = {
   cpg_embedding: 2000, // Code patterns
   extracted: 2000,     // Extracted data
   impulse_signature: 500, // Signatures have no body content
+  vessel_construction_pattern: 2000,
+  impulse_activity_pattern: 2000,
+  architectural_pattern_principle: 2000,
 };
 
 export interface CreateFromSourceParams {

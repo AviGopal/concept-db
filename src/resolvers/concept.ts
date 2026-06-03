@@ -40,6 +40,9 @@ function inferShape(sourceType: SourceType, explicitShape?: string): string {
     cpg_embedding: 'code_pattern',
     extracted: 'extracted_data',
     impulse_signature: 'impulse_signature',
+    vessel_construction_pattern: 'vessel_construction_pattern',
+    impulse_activity_pattern: 'impulse_activity_pattern',
+    architectural_pattern_principle: 'architectural_pattern_principle',
   };
 
   return shapeMap[sourceType] || 'unknown';
