@@ -1,0 +1,102 @@
+{
+  "id": "concept-db-pipeline-health-check",
+  "name": "Concept DB Pipeline Health Check",
+  "description": "Verifies the concept-db relevance pipeline is healthy end-to-end: BM25/FTS search returns results, passive usage forwarding increments times_loaded, and no recent forward errors appear in journald. Emits conceptDbPipelineHealthReport and optionally triggers a systemd restart if critical failures are detected.",
+  "tags": [
+    "health.check",
+    "concept.db",
+    "pipeline",
+    "observability",
+    "bm25",
+    "passive.usage"
+  ],
+  "concepts": [
+    "concept_OT0RHCCj-Mm3"
+  ],
+  "input_shapes": [],
+  "output_shapes": [
+    "conceptDbPipelineHealthReport"
+  ],
+  "tasks": [
+    {
+      "id": "search-and-check-bm25",
+      "description": "Call GET /concepts/search?q=substrate&limit=3 on the concept-db endpoint (localhost:18260) and check journalctl for RRF merge log lines confirming ftsCount > 0. Also capture the raw HTTP response body.",
+      "resolver": "bash",
+      "config": {
+        "command": "echo '=== HTTP response ===' && curl -sf 'http://127.0.0.1:18260/concepts/search?q=substrate&limit=3' 2>&1 || echo 'CURL_FAILED'; echo '=== journalctl RRF merge (last 50 lines) ===' && journalctl -u concept-db --no-pager -n 50 2>/dev/null | grep -iE '(rrf|bm25|fts|merge|ftsCount)' | tail -20 || echo 'JOURNAL_UNAVAILABLE'",
+        "timeout_ms": 15000
+      },
+      "output_shapes": [
+        "conceptDbSearchResult"
+      ]
+    },
+    {
+      "id": "check-times-loaded-increment",
+      "description": "Read a sample concept from concept-db before and after issuing a search request, asserting that times_loaded incremented. Use the concept-db HTTP API on port 18260.",
+      "resolver": "bash",
+      "config": {
+        "command": "echo '=== before ===' && curl -sf 'http://127.0.0.1:18260/concepts?limit=1' 2>&1 | head -5 || echo 'FETCH_FAILED_BEFORE'; echo '=== trigger usage ===' && curl -sf 'http://127.0.0.1:18260/concepts/search?q=vessel&limit=1' > /dev/null 2>&1 && echo 'SEARCH_OK' || echo 'SEARCH_FAILED'; echo '=== after ===' && curl -sf 'http://127.0.0.1:18260/concepts?limit=1' 2>&1 | head -5 || echo 'FETCH_FAILED_AFTER'; echo '=== journalctl usage forwarding (last 20 lines) ===' && journalctl -u concept-db --no-pager -n 100 2>/dev/null | grep -iE '(recordUsage|times_loaded|usage|forward)' | tail -20 || echo 'JOURNAL_UNAVAILABLE'",
+        "timeout_ms": 20000
+      },
+      "output_shapes": [
+        "conceptDbUsageIncrementResult"
+      ]
+    },
+    {
+      "id": "check-forward-errors",
+      "description": "Scan journalctl for concept-db for any 'Failed to forward usage' lines in the last 5 minutes and count them.",
+      "resolver": "bash",
+      "config": {
+        "command": "SINCE=$(date -d '5 minutes ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -v-5M '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo ''); if [ -n \"$SINCE\" ]; then journalctl -u concept-db --no-pager --since \"$SINCE\" 2>/dev/null | grep -ic 'Failed to forward usage' || echo 0; else journalctl -u concept-db --no-pager -n 200 2>/dev/null | grep -ic 'Failed to forward usage' || echo 0; fi",
+        "timeout_ms": 10000
+      },
+      "output_shapes": [
+        "conceptDbForwardErrorCount"
+      ]
+    },
+    {
+      "id": "emit-health-report",
+      "description": "Synthesise the results of the three prior tasks into a conceptDbPipelineHealthReport. If bm25_active is false or forward_errors_last_5min > 5, set needs_restart to true.",
+      "resolver": "llm",
+      "prompt": {
+        "template": "You are producing a health report for the concept-db pipeline.\n\n## Task 1 output — search + BM25 check\n{{search-and-check-bm25_stdout}}\n\n## Task 2 output — times_loaded increment check\n{{check-times-loaded-increment_stdout}}\n\n## Task 3 output — forward error count (raw number or text)\n{{check-forward-errors_stdout}}\n\nFrom the above, determine:\n- bm25_active: true if the search returned at least one result AND the journal shows ftsCount > 0 (or shows any RRF/BM25 activity). If HTTP returned CURL_FAILED or result array is empty, set false.\n- passive_usage_working: true if the journal shows recordUsage or times_loaded activity, or if the before/after concept data shows incremented usage. False if FETCH_FAILED or no usage lines found.\n- forward_errors_last_5min: parse the numeric output from Task 3. If JOURNAL_UNAVAILABLE treat as 0.\n- needs_restart: true if bm25_active is false OR forward_errors_last_5min > 5.\n- summary: one sentence describing overall pipeline health.\n\nReturn only a JSON object with exactly these fields:\n{\n  \"checked_at\": \"<ISO timestamp>\",\n  \"bm25_active\": <bool>,\n  \"passive_usage_working\": <bool>,\n  \"forward_errors_last_5min\": <number>,\n  \"needs_restart\": <bool>,\n  \"summary\": \"<string>\"\n}",
+        "variables": [
+          {
+            "name": "search-and-check-bm25_stdout",
+            "source": "task_output",
+            "task_id": "search-and-check-bm25",
+            "field": "stdout"
+          },
+          {
+            "name": "check-times-loaded-increment_stdout",
+            "source": "task_output",
+            "task_id": "check-times-loaded-increment",
+            "field": "stdout"
+          },
+          {
+            "name": "check-forward-errors_stdout",
+            "source": "task_output",
+            "task_id": "check-forward-errors",
+            "field": "stdout"
+          }
+        ]
+      },
+      "input_shapes": [
+        "conceptDbSearchResult",
+        "conceptDbUsageIncrementResult",
+        "conceptDbForwardErrorCount"
+      ],
+      "output_shapes": [
+        "conceptDbPipelineHealthReport"
+      ]
+    }
+  ],
+  "metrics": {
+    "total_executions": 0,
+    "successful_executions": 0,
+    "failed_executions": 0,
+    "success_rate": 0,
+    "thompson_alpha": 1,
+    "thompson_beta": 1
+  }
+}

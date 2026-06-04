@@ -1,0 +1,87 @@
+{
+  "id": "vessel-auth-integration-audit",
+  "name": "Vessel Auth Integration Audit",
+  "description": "Audits whether vessel cross-service HTTP calls include proper authentication headers. Scans call sites for activity-api endpoints (impulse-relevance, execution-traces, templates, etc.) and verifies each call constructs an Authorization header from a non-empty config or env value.",
+  "tags": [
+    "audit",
+    "security",
+    "vessel",
+    "auth",
+    "integration"
+  ],
+  "concepts": [
+    "concept_DPB4vXWBXur1"
+  ],
+  "input_shapes": [
+    "vesselSourcePath"
+  ],
+  "output_shapes": [
+    "vesselAuthAuditReport"
+  ],
+  "tasks": [
+    {
+      "id": "find-activity-api-callsites",
+      "description": "Grep repos/ for HTTP call sites targeting activity-api endpoints such as /v2/activities/impulse-relevance, /v2/activities/execution-traces, /v2/activities/templates, /v2/impulses/resolve, and record each file and line number found.",
+      "resolver": "bash",
+      "config": {
+        "command": "grep -rn --include='*.ts' --include='*.js' -E '/(v2/activities/(impulse-relevance|execution-traces|templates|recommend|discover-by-shapes)|v2/impulses/resolve|v2/goal-paths)' /home/avi/documents/work/exp-repo/metabob-devbob/repos/ 2>/dev/null | head -200",
+        "timeout_ms": 30000
+      },
+      "output_shapes": [
+        "activityApiCallSites"
+      ]
+    },
+    {
+      "id": "check-auth-headers",
+      "description": "For each call site found in the previous task, read the surrounding context (±20 lines) and determine whether an Authorization header is present and constructed from a non-empty config key or environment variable. Look for patterns like Authorization: ApiKey, Authorization: Bearer, headers.Authorization, config.apiKey, process.env.METABOB_API_KEY, apiKey != null, etc.",
+      "resolver": "llm",
+      "prompt": {
+        "template": "You are auditing vessel source code for proper authentication in cross-service HTTP calls.\n\nBelow is the list of call sites found by grepping for activity-api endpoint patterns:\n\n{{find-activity-api-callsites_stdout}}\n\nFor each unique file path in the list above, read the surrounding context and determine:\n1. Is an Authorization header set on this request?\n2. If yes, what config/env key is used (e.g. METABOB_API_KEY, config.apiKey, apiKey)?\n3. Is there a guard that prevents sending an empty/undefined auth value?\n\nFor each call site, produce a JSON object with fields:\n- vessel: string (inferred from the repo path segment, e.g. 'concept-db', 'boredom-vessel')\n- call_site: string (file:line)\n- endpoint: string (the matched endpoint path)\n- has_auth: boolean\n- config_key_used: string | null\n- notes: string (brief reason)\n\nReturn a JSON array of these objects and nothing else.",
+        "variables": [
+          {
+            "name": "find-activity-api-callsites_stdout",
+            "source": "task_output",
+            "task_id": "find-activity-api-callsites",
+            "field": "stdout"
+          }
+        ]
+      },
+      "input_shapes": [
+        "activityApiCallSites"
+      ],
+      "output_shapes": [
+        "vesselAuthAuditReport"
+      ]
+    },
+    {
+      "id": "emit-audit-report",
+      "description": "Format and emit the vesselAuthAuditReport impulse. Summarise: total call sites checked, how many have_auth, how many are missing auth, list vessels with missing auth.",
+      "resolver": "llm",
+      "prompt": {
+        "template": "Given the following per-call-site audit JSON:\n\n{{check-auth-headers_output}}\n\nProduce a final vesselAuthAuditReport JSON object with fields:\n- checked_at: ISO timestamp (use current time)\n- total_call_sites: number\n- auth_present_count: number\n- auth_missing_count: number\n- vessels_missing_auth: string[] (unique vessel names where has_auth is false)\n- call_sites: the full array from above\n\nReturn only the JSON object.",
+        "variables": [
+          {
+            "name": "check-auth-headers_output",
+            "source": "task_output",
+            "task_id": "check-auth-headers",
+            "field": "content"
+          }
+        ]
+      },
+      "input_shapes": [
+        "vesselAuthAuditReport"
+      ],
+      "output_shapes": [
+        "vesselAuthAuditReport"
+      ]
+    }
+  ],
+  "metrics": {
+    "total_executions": 0,
+    "successful_executions": 0,
+    "failed_executions": 0,
+    "success_rate": 0,
+    "thompson_alpha": 1,
+    "thompson_beta": 1
+  }
+}
