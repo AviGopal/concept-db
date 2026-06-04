@@ -153,7 +153,7 @@ export function loadConfig(): Config {
     },
 
     activityApi: {
-      url: process.env.ACTIVITY_API_URL || 'http://metabob-activity-api:8080',
+      url: process.env.ACTIVITY_API_ENDPOINT || process.env.ACTIVITY_API_URL || 'http://127.0.0.1:8080',
       timeout: parseEnvInt('ACTIVITY_API_TIMEOUT', 30000),
     },
 

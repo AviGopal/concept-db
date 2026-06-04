@@ -140,21 +140,26 @@ async function forwardToActivityApi(
   request: RecordUsageRequest,
   orgId: string
 ): Promise<void> {
+  // Only forward when there is an activity context — the impulse-relevance
+  // endpoint requires activity_variant_id and was_loaded/execution_succeeded.
+  // Passive search usage (no activity) updates concept metrics locally only.
+  if (!request.activity_id) return;
+
   try {
     const response = await fetch(`${config.activityApi.url}/v2/activities/impulse-relevance`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(config.activityApi.apiKey ? { 'Authorization': `ApiKey ${config.activityApi.apiKey}` } : {}),
+        ...(config.metabob.apiKey ? { 'Authorization': `ApiKey ${config.metabob.apiKey}` } : {}),
       },
       body: JSON.stringify({
         impulse_id: `concept:${request.concept_id}`,
-        trace_id: request.trace_id,
-        activity_id: request.activity_id,
+        activity_variant_id: request.activity_id,
         task_id: request.task_id,
-        outcome: request.outcome,
-        org_id: orgId,
-        source: 'concept-db',
+        execution_id: request.trace_id,
+        was_loaded: true,
+        execution_succeeded: request.outcome !== 'failure',
+        pointer_type: 'concept',
       }),
       signal: AbortSignal.timeout(config.activityApi.timeout),
     });
