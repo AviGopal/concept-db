@@ -145,6 +145,7 @@ async function forwardToActivityApi(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...(config.activityApi.apiKey ? { 'Authorization': `ApiKey ${config.activityApi.apiKey}` } : {}),
       },
       body: JSON.stringify({
         impulse_id: `concept:${request.concept_id}`,

@@ -28,8 +28,8 @@
 --   LIMIT $limit START $offset
 -- =============================================================================
 
-DEFINE ANALYZER IF NOT EXISTS concept_analyzer TOKENIZERS blank, class, camel FILTERS lowercase, ascii, snowball(english);
+DEFINE ANALYZER IF NOT EXISTS concept_analyzer TOKENIZERS blank, class FILTERS lowercase, ascii;
 
-DEFINE INDEX IF NOT EXISTS idx_concept_content_fts ON concept FIELDS content FULLTEXT ANALYZER concept_analyzer BM25(1.2, 0.75);
+DEFINE INDEX IF NOT EXISTS idx_concept_content_fts ON concept FIELDS content SEARCH ANALYZER concept_analyzer BM25(1.2, 0.75) HIGHLIGHTS;
 
-DEFINE INDEX IF NOT EXISTS idx_concept_summary_fts ON concept FIELDS summary FULLTEXT ANALYZER concept_analyzer BM25(1.2, 0.75);
+DEFINE INDEX IF NOT EXISTS idx_concept_summary_fts ON concept FIELDS summary SEARCH ANALYZER concept_analyzer BM25(1.2, 0.75) HIGHLIGHTS;

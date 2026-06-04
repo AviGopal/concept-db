@@ -165,7 +165,8 @@ const adjustPriorityRelevance: UpkeepActivity = {
   description: 'Align priority with relevance when they diverge significantly',
   candidateQuery: `
     SELECT *, math::abs(priority - relevance) AS divergence FROM concept
-    WHERE math::abs(priority - relevance) > 0.3
+    WHERE priority != NONE AND relevance != NONE
+      AND math::abs(priority - relevance) > 0.3
     ORDER BY divergence DESC
     LIMIT 20
   `,
@@ -175,7 +176,7 @@ const adjustPriorityRelevance: UpkeepActivity = {
     const concept = candidate as Concept;
 
     // EMA adjustment: new_priority = old_priority * 0.7 + relevance * 0.3
-    const newPriority = concept.priority * 0.7 + concept.relevance * 0.3;
+    const newPriority = (concept.priority ?? concept.relevance) * 0.7 + concept.relevance * 0.3;
 
     await updateConcept(
       concept.id,
