@@ -47,7 +47,7 @@ function installEdgeQuerySpy(rows: EdgeRow[]) {
       }
 
       // Create a new edge
-      if (/^\s*CREATE\s+type::record\("concept_edge"/i.test(sql)) {
+      if (/^\s*INSERT\s+INTO\s+concept_edge\s*\{/i.test(sql)) {
         const row: EdgeRow = {
           id: params.id as string,
           from_concept_id: params.from_concept_id as string,
@@ -63,7 +63,7 @@ function installEdgeQuerySpy(rows: EdgeRow[]) {
       }
 
       // Update existing edge weight, traversal, optional description
-      if (/^\s*UPDATE\s+type::record\("concept_edge"/i.test(sql)) {
+      if (/^\s*UPDATE\s+type::thing\("concept_edge"/i.test(sql)) {
         const edgeId = params.edge_id as string;
         const row = rows.find((r) => r.id === edgeId);
         if (!row) throw new Error(`Edge not found in mock: ${edgeId}`);

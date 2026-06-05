@@ -92,18 +92,19 @@ export async function createImpulse(
   };
 
   const sql = `
-    CREATE type::record("impulse", $id) SET
-      id = $id,
-      pointer = $pointer,
-      shape = $shape,
-      summary = $summary,
-      content = $content,
-      metadata = $metadata,
-      org_id = $org_id,
-      project_id = $project_id,
-      created_by_activity_id = $created_by_activity_id,
-      created_by_resolver_id = $created_by_resolver_id,
-      expires_at = $expires_at
+    INSERT INTO impulse {
+      id: type::thing("impulse", $id),
+      pointer: $pointer,
+      shape: $shape,
+      summary: $summary,
+      content: $content,
+      metadata: $metadata,
+      org_id: $org_id,
+      project_id: $project_id,
+      created_by_activity_id: $created_by_activity_id,
+      created_by_resolver_id: $created_by_resolver_id,
+      expires_at: $expires_at
+    }
   `;
 
   const results = jwtToken
@@ -155,7 +156,7 @@ export async function getImpulseById(
   orgId: string,
   jwtToken?: string,
 ): Promise<Impulse | null> {
-  const sql = `SELECT * FROM type::record("impulse", $id) WHERE org_id = $org_id`;
+  const sql = `SELECT * FROM type::thing("impulse", $id) WHERE org_id = $org_id`;
   const params = { id, org_id: orgId };
 
   const results = jwtToken
@@ -187,7 +188,7 @@ export async function expireImpulse(
   jwtToken?: string,
 ): Promise<Impulse | null> {
   const sql = `
-    UPDATE type::record("impulse", $id) SET expires_at = time::now()
+    UPDATE type::thing("impulse", $id) SET expires_at = time::now()
     WHERE org_id = $org_id
   `;
   const params = { id, org_id: orgId };

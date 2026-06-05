@@ -95,7 +95,7 @@ describe('/v2/impulses/resolve → impulseSignatureConcept', () => {
         }
 
         // upsertBySignature create
-        if (/^\s*CREATE\s+type::record\("concept"/i.test(sql)) {
+        if (/^\s*CREATE\s+type::thing\("concept"/i.test(sql)) {
           const row = makeConcept(
             params.id as string,
             (params.pointer as { type: string }).type,
@@ -107,7 +107,7 @@ describe('/v2/impulses/resolve → impulseSignatureConcept', () => {
         }
 
         // getConceptById
-        if (/^\s*SELECT\s+\*\s+FROM\s+type::record\("concept"/i.test(sql)) {
+        if (/^\s*SELECT\s+\*\s+FROM\s+type::thing\("concept"/i.test(sql)) {
           const id = params.concept_id as string;
           const match = concepts.find((c) => c.id === id);
           return match ? [match as never] : [];

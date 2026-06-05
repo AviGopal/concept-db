@@ -107,7 +107,7 @@ function installSpy(store: FakeStore) {
       }
 
       // ---- concept create (used by concept_create_write & signature upsert) ----
-      if (/^\s*CREATE\s+type::record\("concept"/i.test(sql)) {
+      if (/^\s*CREATE\s+type::thing\("concept"/i.test(sql)) {
         // upsertBySignature embeds source_type as a SQL literal, so derive
         // it from the SQL when params.source_type is missing.
         let sourceType = params.source_type as string | undefined;
@@ -141,7 +141,7 @@ function installSpy(store: FakeStore) {
       }
 
       // ---- concept by id (auto-search hook does this) ----
-      if (/^\s*SELECT\s+\*\s+FROM\s+type::record\("concept"/i.test(sql)) {
+      if (/^\s*SELECT\s+\*\s+FROM\s+type::thing\("concept"/i.test(sql)) {
         const id = params.concept_id as string;
         const match = store.concepts.find((c) => c.id === id);
         return match ? [match as never] : [];
@@ -181,7 +181,7 @@ function installSpy(store: FakeStore) {
       }
 
       // ---- edge create ----
-      if (/^\s*CREATE\s+type::record\("concept_edge"/i.test(sql)) {
+      if (/^\s*INSERT\s+INTO\s+concept_edge\s*\{/i.test(sql)) {
         const row: EdgeRow = {
           id: params.id as string,
           from_concept_id: params.from_concept_id as string,
@@ -197,7 +197,7 @@ function installSpy(store: FakeStore) {
       }
 
       // ---- edge update ----
-      if (/^\s*UPDATE\s+type::record\("concept_edge"/i.test(sql)) {
+      if (/^\s*UPDATE\s+type::thing\("concept_edge"/i.test(sql)) {
         const id = params.edge_id as string;
         const e = store.edges.find((row) => row.id === id);
         if (e && params.weight !== undefined) e.weight = Number(params.weight);
@@ -206,7 +206,7 @@ function installSpy(store: FakeStore) {
       }
 
       // ---- usage create ----
-      if (/^\s*CREATE\s+type::record\("concept_usage"/i.test(sql)) {
+      if (/^\s*CREATE\s+type::thing\("concept_usage"/i.test(sql)) {
         const row: UsageRow = {
           id: params.id as string,
           concept_id: params.concept_id as string,
@@ -220,14 +220,14 @@ function installSpy(store: FakeStore) {
 
       // ---- concept metric updates (Bayesian update inside recordUsage) ----
       if (
-        /^\s*UPDATE\s+type::record\("concept"/i.test(sql) &&
+        /^\s*UPDATE\s+type::thing\("concept"/i.test(sql) &&
         /(times_succeeded|times_failed|relevance)/i.test(sql)
       ) {
         return [] as never[];
       }
 
       // ---- impulse table ops (audit log emission) ----
-      if (/^\s*CREATE\s+type::record\("impulse"/i.test(sql)) {
+      if (/^\s*INSERT\s+INTO\s+impulse\s*\{/i.test(sql)) {
         const row: ImpulseRow = {
           id: params.id as string,
           shape: params.shape as string,

@@ -46,15 +46,16 @@ export async function createEdge(
   const toId = normalizeConceptId(request.to_concept_id) ?? request.to_concept_id;
 
   const sql = `
-    CREATE type::record("concept_edge", $id) SET
-      id = $id,
-      from_concept = type::record("concept", $from_concept_id),
-      to_concept = type::record("concept", $to_concept_id),
-      edge_type = $edge_type,
-      description = $description,
-      weight = $weight,
-      times_traversed = 0,
-      org_id = $org_id
+    INSERT INTO concept_edge {
+      id: type::thing("concept_edge", $id),
+      from_concept: type::thing("concept", $from_concept_id),
+      to_concept: type::thing("concept", $to_concept_id),
+      edge_type: $edge_type,
+      description: $description,
+      weight: $weight,
+      times_traversed: 0,
+      org_id: $org_id
+    }
   `;
 
   const params = {
@@ -62,7 +63,7 @@ export async function createEdge(
     from_concept_id: fromId,
     to_concept_id: toId,
     edge_type: request.edge_type,
-    description: request.description || null,
+    description: request.description ?? undefined,
     weight: request.weight ?? 0.5,
     org_id: orgId,
   };
@@ -122,8 +123,8 @@ export async function upsertEdge(
   // Look up existing edge (if any).
   const findSql = `
     SELECT id, weight FROM concept_edge
-    WHERE from_concept = type::record("concept", $from_id)
-      AND to_concept = type::record("concept", $to_id)
+    WHERE from_concept = type::thing("concept", $from_id)
+      AND to_concept = type::thing("concept", $to_id)
       AND edge_type = $edge_type
     LIMIT 1
   `;
@@ -162,7 +163,7 @@ export async function upsertEdge(
       params.description = request.description;
     }
 
-    const updateSql = `UPDATE type::record("concept_edge", $edge_id) SET ${setClauses.join(', ')}`;
+    const updateSql = `UPDATE type::thing("concept_edge", $edge_id) SET ${setClauses.join(', ')}`;
 
     jwtToken
       ? await queryWithAuth(jwtToken, updateSql, params)
@@ -186,15 +187,16 @@ export async function upsertEdge(
   // No existing edge — create with times_traversed=1 (the current observation).
   const id = `edge_${nanoid(12)}`;
   const createSql = `
-    CREATE type::record("concept_edge", $id) SET
-      id = $id,
-      from_concept = type::record("concept", $from_concept_id),
-      to_concept = type::record("concept", $to_concept_id),
-      edge_type = $edge_type,
-      description = $description,
-      weight = $weight,
-      times_traversed = 1,
-      org_id = $org_id
+    INSERT INTO concept_edge {
+      id: type::thing("concept_edge", $id),
+      from_concept: type::thing("concept", $from_concept_id),
+      to_concept: type::thing("concept", $to_concept_id),
+      edge_type: $edge_type,
+      description: $description,
+      weight: $weight,
+      times_traversed: 1,
+      org_id: $org_id
+    }
   `;
 
   const createParams = {
@@ -202,7 +204,7 @@ export async function upsertEdge(
     from_concept_id: fromId,
     to_concept_id: toId,
     edge_type: request.edge_type,
-    description: request.description ?? null,
+    description: request.description ?? undefined,
     weight: observedWeight,
     org_id: orgId,
   };
@@ -242,11 +244,11 @@ export async function getEdgesForConcept(
   const conditions: string[] = [];
 
   if (direction === 'outgoing') {
-    conditions.push('from_concept = type::record("concept", $concept_id)');
+    conditions.push('from_concept = type::thing("concept", $concept_id)');
   } else if (direction === 'incoming') {
-    conditions.push('to_concept = type::record("concept", $concept_id)');
+    conditions.push('to_concept = type::thing("concept", $concept_id)');
   } else {
-    conditions.push('(from_concept = type::record("concept", $concept_id) OR to_concept = type::record("concept", $concept_id))');
+    conditions.push('(from_concept = type::thing("concept", $concept_id) OR to_concept = type::thing("concept", $concept_id))');
   }
 
   if (edgeTypes && edgeTypes.length > 0) {
@@ -269,7 +271,7 @@ export async function updateEdgeWeight(
   weight: number,
   jwtToken?: string
 ): Promise<ConceptEdge> {
-  const sql = `UPDATE type::record("concept_edge", $edge_id) SET weight = $weight`;
+  const sql = `UPDATE type::thing("concept_edge", $edge_id) SET weight = $weight`;
   const results = jwtToken
     ? await queryWithAuth<ConceptEdge>(jwtToken, sql, { edge_id: edgeId, weight })
     : await surrealDB.query<ConceptEdge>(sql, { edge_id: edgeId, weight });
@@ -289,7 +291,7 @@ export async function incrementTraversal(
   edgeId: string,
   jwtToken?: string
 ): Promise<void> {
-  const sql = `UPDATE type::record("concept_edge", $edge_id) SET times_traversed = times_traversed + 1`;
+  const sql = `UPDATE type::thing("concept_edge", $edge_id) SET times_traversed = times_traversed + 1`;
   jwtToken
     ? await queryWithAuth(jwtToken, sql, { edge_id: edgeId })
     : await surrealDB.query(sql, { edge_id: edgeId });
@@ -302,7 +304,7 @@ export async function deleteEdge(
   edgeId: string,
   jwtToken?: string
 ): Promise<void> {
-  const sql = `DELETE type::record("concept_edge", $edge_id)`;
+  const sql = `DELETE type::thing("concept_edge", $edge_id)`;
   jwtToken
     ? await queryWithAuth(jwtToken, sql, { edge_id: edgeId })
     : await surrealDB.query(sql, { edge_id: edgeId });
@@ -427,8 +429,8 @@ export async function edgeExists(
 ): Promise<boolean> {
   const sql = `
     SELECT count() as cnt FROM concept_edge
-    WHERE from_concept = type::record("concept", $from_id)
-      AND to_concept = type::record("concept", $to_id)
+    WHERE from_concept = type::thing("concept", $from_id)
+      AND to_concept = type::thing("concept", $to_id)
       AND edge_type = $edge_type
     GROUP ALL
   `;

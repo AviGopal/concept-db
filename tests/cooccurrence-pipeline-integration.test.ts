@@ -148,7 +148,7 @@ function installPipelineSpy(
       }
 
       // 2. upsertBySignature CREATE
-      if (/^\s*CREATE\s+type::record\("concept"/i.test(sql)) {
+      if (/^\s*CREATE\s+type::thing\("concept"/i.test(sql)) {
         const row: ConceptRow = {
           id: params.id as string,
           pointer: params.pointer as {
@@ -178,7 +178,7 @@ function installPipelineSpy(
       }
 
       // 4. upsertEdge CREATE
-      if (/^\s*CREATE\s+type::record\("concept_edge"/i.test(sql)) {
+      if (/^\s*INSERT\s+INTO\s+concept_edge\s*\{/i.test(sql)) {
         const row: EdgeRow = {
           id: params.id as string,
           from_concept_id: params.from_concept_id as string,
@@ -194,7 +194,7 @@ function installPipelineSpy(
       }
 
       // 5. upsertEdge UPDATE (EMA path) — increments times_traversed and sets weight
-      if (/^\s*UPDATE\s+type::record\("concept_edge"/i.test(sql)) {
+      if (/^\s*UPDATE\s+type::thing\("concept_edge"/i.test(sql)) {
         const edgeId = params.edge_id as string;
         const row = edges.find((e) => e.id === edgeId);
         if (!row) throw new Error(`Edge not found in mock: ${edgeId}`);

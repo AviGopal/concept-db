@@ -53,7 +53,7 @@ function installImpulseSpy(rows: ImpulseRow[]) {
       const params = args[1] || {};
 
       // CREATE
-      if (/^\s*CREATE\s+type::record\("impulse"/i.test(sql)) {
+      if (/^\s*INSERT\s+INTO\s+impulse\s*\{/i.test(sql)) {
         const row: ImpulseRow = {
           id: params.id as string,
           pointer: params.pointer as Record<string, unknown>,
@@ -73,7 +73,7 @@ function installImpulseSpy(rows: ImpulseRow[]) {
       }
 
       // SELECT by id (org-scoped)
-      if (/^\s*SELECT\s+\*\s+FROM\s+type::record\("impulse"/i.test(sql)) {
+      if (/^\s*SELECT\s+\*\s+FROM\s+type::thing\("impulse"/i.test(sql)) {
         const id = params.id as string;
         const orgId = params.org_id as string;
         const match = rows.find((r) => r.id === id && r.org_id === orgId);
@@ -82,7 +82,7 @@ function installImpulseSpy(rows: ImpulseRow[]) {
 
       // UPDATE — expireImpulse
       if (
-        /^\s*UPDATE\s+type::record\("impulse"/i.test(sql) &&
+        /^\s*UPDATE\s+type::thing\("impulse"/i.test(sql) &&
         /expires_at\s*=\s*time::now\(\)/i.test(sql)
       ) {
         const id = params.id as string;

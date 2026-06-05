@@ -49,7 +49,7 @@ function installInMemoryQuerySpy(rows: SignatureRow[]) {
         return match ? [{ id: match.id } as never] : [];
       }
 
-      if (/^\s*CREATE\s+type::record\("concept"/i.test(sql)) {
+      if (/^\s*CREATE\s+type::thing\("concept"/i.test(sql)) {
         const row: SignatureRow = {
           id: params.id as string,
           pointer: params.pointer as { type: string; metadata?: Record<string, unknown> },
