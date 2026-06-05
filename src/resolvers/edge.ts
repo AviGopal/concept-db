@@ -8,6 +8,7 @@ import { nanoid } from 'nanoid';
 import { surrealDB, queryWithAuth } from '../db/surreal';
 import { logger } from '../utils/logger';
 import { lifecycleDispatcher } from '../lifecycle/dispatcher';
+import { normalizeConceptId } from '../services/passive-usage';
 import type { ConceptEdge, LinkConceptsRequest, EdgeType } from '../models/schemas';
 
 /**
@@ -39,6 +40,10 @@ export async function createEdge(
   jwtToken?: string
 ): Promise<ConceptEdge> {
   const id = `edge_${nanoid(12)}`;
+  // Normalize both endpoints at the resolver boundary so edges always point
+  // to canonical concept records (e.g. "concept__SN64BnJ" not "_SN64BnJ").
+  const fromId = normalizeConceptId(request.from_concept_id) ?? request.from_concept_id;
+  const toId = normalizeConceptId(request.to_concept_id) ?? request.to_concept_id;
 
   const sql = `
     CREATE type::record("concept_edge", $id) SET
@@ -54,8 +59,8 @@ export async function createEdge(
 
   const params = {
     id,
-    from_concept_id: request.from_concept_id,
-    to_concept_id: request.to_concept_id,
+    from_concept_id: fromId,
+    to_concept_id: toId,
     edge_type: request.edge_type,
     description: request.description || null,
     weight: request.weight ?? 0.5,
@@ -109,6 +114,10 @@ export async function upsertEdge(
   jwtToken?: string,
 ): Promise<UpsertEdgeResult> {
   const observedWeight = request.weight ?? 0.5;
+  // Normalize both endpoints at the resolver boundary so edges always point
+  // to canonical concept records (e.g. "concept__SN64BnJ" not "_SN64BnJ").
+  const fromId = normalizeConceptId(request.from_concept_id) ?? request.from_concept_id;
+  const toId = normalizeConceptId(request.to_concept_id) ?? request.to_concept_id;
 
   // Look up existing edge (if any).
   const findSql = `
@@ -121,13 +130,13 @@ export async function upsertEdge(
 
   const existing = jwtToken
     ? await queryWithAuth<{ id: string; weight: number }>(jwtToken, findSql, {
-        from_id: request.from_concept_id,
-        to_id: request.to_concept_id,
+        from_id: fromId,
+        to_id: toId,
         edge_type: request.edge_type,
       })
     : await surrealDB.query<{ id: string; weight: number }>(findSql, {
-        from_id: request.from_concept_id,
-        to_id: request.to_concept_id,
+        from_id: fromId,
+        to_id: toId,
         edge_type: request.edge_type,
       });
 
@@ -190,8 +199,8 @@ export async function upsertEdge(
 
   const createParams = {
     id,
-    from_concept_id: request.from_concept_id,
-    to_concept_id: request.to_concept_id,
+    from_concept_id: fromId,
+    to_concept_id: toId,
     edge_type: request.edge_type,
     description: request.description ?? null,
     weight: observedWeight,

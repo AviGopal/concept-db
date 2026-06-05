@@ -15,7 +15,7 @@ import { upsertEdge, getImpulseCooccurrenceEdges } from '../resolvers/edge';
 import { upsertBySignature } from '../resolvers/concept';
 import { recordUsage } from '../resolvers/usage';
 import { recordSequence } from '../resolvers/sequence';
-import { recordPassiveUsageForResults } from '../services/passive-usage';
+import { recordPassiveUsageForResults, normalizeConceptId } from '../services/passive-usage';
 import type { Concept } from '../models/schemas';
 import {
   CreateConceptRequestSchema,
@@ -59,7 +59,18 @@ export async function handleToolCall(
       }
 
       case 'concept_link': {
-        const request = LinkConceptsRequestSchema.parse(args);
+        // Normalize both endpoint IDs at the tool boundary so MCP callers that
+        // pass bare nanoid or prefixed forms get canonical records.
+        const normalizedArgs = {
+          ...args,
+          from_concept_id: typeof args.from_concept_id === 'string'
+            ? (normalizeConceptId(args.from_concept_id) ?? args.from_concept_id)
+            : args.from_concept_id,
+          to_concept_id: typeof args.to_concept_id === 'string'
+            ? (normalizeConceptId(args.to_concept_id) ?? args.to_concept_id)
+            : args.to_concept_id,
+        };
+        const request = LinkConceptsRequestSchema.parse(normalizedArgs);
         const result = await upsertEdge(request, orgId, jwtToken);
         return { success: true, result };
       }

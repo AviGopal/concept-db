@@ -382,9 +382,15 @@ concepts.post('/:id/link', async (c) => {
 
   try {
     const body = await c.req.json();
+    // Normalize to_concept_id from the body as well, mirroring the from_concept_id
+    // normalization above. Without this, callers that pass bare nanoid or
+    // `concept:concept_X` forms end up creating edges to non-canonical record ids.
+    const rawToId = body.to_concept_id;
+    const normalizedToId = rawToId ? (normalizeConceptId(rawToId) ?? rawToId) : rawToId;
     const request = LinkConceptsRequestSchema.parse({
       from_concept_id: fromConceptId,
       ...body,
+      ...(normalizedToId !== undefined ? { to_concept_id: normalizedToId } : {}),
     });
 
     const edge = await createEdge(request, orgId, jwtAuth?.jwtToken);

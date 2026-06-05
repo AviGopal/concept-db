@@ -630,7 +630,11 @@ export async function getNeighbors(
   orgId: string,
   jwtToken?: string
 ): Promise<{ concept: Concept; edge: ConceptEdge }[]> {
-  const { concept_id, direction = 'both', edge_types, limit = 10 } = request;
+  // Normalize at resolver boundary — callers may pass any of `X`, `concept_X`,
+  // `concept:concept_X`, or `concept:⟨concept_X⟩`. The downstream
+  // type::thing("concept", $concept_id) requires the bare canonical form.
+  const { direction = 'both', edge_types, limit = 10 } = request;
+  const concept_id = normalizeConceptId(request.concept_id) ?? request.concept_id;
 
   const params: Record<string, unknown> = {
     concept_id,
@@ -671,11 +675,20 @@ export async function getNeighbors(
     ? await queryWithAuth<ConceptEdge & { neighbor_id: string }>(jwtToken, sql, params)
     : await surrealDB.query<ConceptEdge & { neighbor_id: string }>(sql, params);
 
-  // Fetch the actual neighbor concepts
-  const neighborIds = edges.map(e => String(e.neighbor_id).replace(/^concept:/, ''));
-  if (neighborIds.length === 0) {
+  // Fetch the actual neighbor concepts.
+  // Strip the "concept:" table prefix from each record reference returned by
+  // SurrealDB so we get the bare record id (e.g. "concept_lBPXttNR01zT").
+  // Then normalize via normalizeConceptId so that IDs that were stored without
+  // the "concept_" prefix (e.g. "_SN64BnJ_NMc") are mapped to their canonical
+  // form (e.g. "concept__SN64BnJ_NMc") before the lookup — this handles edges
+  // that were created with un-prefixed to_concept_id values.
+  const rawNeighborIds = edges.map(e =>
+    String(e.neighbor_id).replace(/^concept:/, '').replace(/^⟨|⟩$/g, '')
+  );
+  if (rawNeighborIds.length === 0) {
     return [];
   }
+  const neighborIds = rawNeighborIds.map(id => normalizeConceptId(id) ?? id);
 
   // `id` on concept is a record link; equality against a plain string never matches.
   // Compare via meta::id() so the bare ids from neighborIds line up.
@@ -689,9 +702,10 @@ export async function getNeighbors(
 
   const result: { concept: Concept; edge: ConceptEdge }[] = [];
 
-  for (const edge of edges) {
-    const neighborId = String(edge.neighbor_id).replace(/^concept:/, '').replace(/^⟨|⟩$/g, '');
-    const concept = conceptMap.get(neighborId);
+  for (let i = 0; i < edges.length; i++) {
+    const edge = edges[i];
+    // Look up by canonical (normalized) id, falling back to raw id
+    const concept = conceptMap.get(neighborIds[i]) ?? conceptMap.get(rawNeighborIds[i]);
     if (concept) {
       // Extract just the ConceptEdge fields, excluding neighbor_id
       const { neighbor_id: _, ...edgeOnly } = edge;
