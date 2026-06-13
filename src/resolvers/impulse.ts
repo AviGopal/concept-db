@@ -91,19 +91,25 @@ export async function createImpulse(
     expires_at: req.expires_at ?? null,
   };
 
+  // SurrealDB distinguishes NULL from NONE: optional fields are option<string>/
+  // option<object> and REJECT NULL ("Found NULL ... expected a option<string>"),
+  // accepting only NONE or a value. The JS client sends `null` as SurrealDB NULL,
+  // so every impulse with no content (e.g. the conceptUpkeepAuditLog write-audit
+  // record emitted on each concept_create_write) failed its INSERT — the audit
+  // trail silently dropped, violating "Record Everything". Coalesce NULL -> NONE.
   const sql = `
     INSERT INTO impulse {
       id: type::thing("impulse", $id),
       pointer: $pointer,
       shape: $shape,
-      summary: $summary,
-      content: $content,
-      metadata: $metadata,
+      summary: $summary ?? NONE,
+      content: $content ?? NONE,
+      metadata: $metadata ?? NONE,
       org_id: $org_id,
-      project_id: $project_id,
-      created_by_activity_id: $created_by_activity_id,
-      created_by_resolver_id: $created_by_resolver_id,
-      expires_at: $expires_at
+      project_id: $project_id ?? NONE,
+      created_by_activity_id: $created_by_activity_id ?? NONE,
+      created_by_resolver_id: $created_by_resolver_id ?? NONE,
+      expires_at: $expires_at ?? NONE
     }
   `;
 
