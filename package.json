@@ -8,6 +8,7 @@
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target bun",
+    "typecheck": "tsc --noEmit",
     "apply-schema": "bun run scripts/apply-schema.ts",
     "test": "bun test",
     "lint": "eslint src --ext .ts && bun run scripts/check-shape-dispatch.ts",
