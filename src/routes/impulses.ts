@@ -31,6 +31,7 @@ import { getImpulseCooccurrenceEdges, upsertEdge } from '../resolvers/edge';
 import { getUsageStats, recordUsage } from '../resolvers/usage';
 import { getSequenceNeighbors, recordSequence } from '../resolvers/sequence';
 import { createImpulse } from '../resolvers/impulse';
+import { embeddingService } from '../services/embedding';
 import { conceptTools, type MCPTool } from '../tools/definitions';
 import {
   CreateConceptRequestSchema,
@@ -636,6 +637,74 @@ impulses.post('/resolve', async (c) => {
 
       case 'mcpTool': {
         result = buildMcpToolResponse(pointer as Parameters<typeof buildMcpToolResponse>[0]);
+        break;
+      }
+
+      // ---------------------------------------------------------------
+      // GENERALIZATION PRIMITIVES (2026-06-19) — composable building blocks so the
+      // substrate can COMPOSE generalization itself (embed activities → cluster →
+      // author a generalized capability node per cluster), rather than the operator
+      // authoring the mechanism. Reuses the local MiniLM model (no duplication).
+      // ---------------------------------------------------------------
+      // embed — text → vector(s). pointer: { type:'embed', texts:string[] } or { text }.
+      case 'embed': {
+        const p = pointer as { texts?: unknown; text?: unknown };
+        const texts = Array.isArray(p.texts)
+          ? p.texts.filter((t): t is string => typeof t === 'string')
+          : typeof p.text === 'string' ? [p.text] : [];
+        if (!texts.length) {
+          return c.json({ error: 'pointer.texts (string[]) or pointer.text (string) required for shape "embed"' }, 400);
+        }
+        const vecs = await embeddingService.embedBatch(texts);
+        result = {
+          content: vecs.map((v, i) => ({ text: texts[i], embedding: Array.from(v) })),
+          metadata: { shape: 'embed', count: texts.length, dim: vecs[0]?.length ?? 0 },
+        };
+        break;
+      }
+
+      // cluster — group items by embedding similarity into MODERATE clusters. pointer:
+      // { type:'cluster', items:[{id, text?}|{id, embedding?}], max_cluster_size?, min_similarity? }.
+      // Greedy single-pass cosine clustering (deterministic — seeds in input order, no
+      // randomness). max_cluster_size caps mega-hubs (the star trap); min_similarity keeps
+      // clusters coherent. Text items are embedded via the local MiniLM model.
+      case 'cluster': {
+        const p = pointer as { items?: unknown; max_cluster_size?: unknown; min_similarity?: unknown };
+        const rawItems = Array.isArray(p.items) ? (p.items as Array<Record<string, unknown>>) : [];
+        if (!rawItems.length) {
+          return c.json({ error: 'pointer.items (array of {id, text|embedding}) required for shape "cluster"' }, 400);
+        }
+        const maxSize = typeof p.max_cluster_size === 'number' ? p.max_cluster_size : 12;
+        const minSim = typeof p.min_similarity === 'number' ? p.min_similarity : 0.6;
+        const toEmbed = rawItems.filter((it) => !Array.isArray(it.embedding) && typeof it.text === 'string');
+        if (toEmbed.length) {
+          const vecs = await embeddingService.embedBatch(toEmbed.map((it) => it.text as string));
+          toEmbed.forEach((it, i) => { it.embedding = Array.from(vecs[i]); });
+        }
+        const norm = (v: number[]): number[] => { let s = 0; for (const x of v) s += x * x; const n = Math.sqrt(s) || 1; return v.map((x) => x / n); };
+        const cos = (a: number[], b: number[]): number => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
+        const normed = rawItems
+          .filter((it) => Array.isArray(it.embedding) && it.id != null)
+          .map((it) => ({ id: it.id, e: norm(it.embedding as number[]) }));
+        const clusters: Array<{ members: unknown[]; centroid: number[] }> = [];
+        for (const it of normed) {
+          let best = -1, bestSim = minSim;
+          for (let k = 0; k < clusters.length; k++) {
+            if (clusters[k].members.length >= maxSize) continue;
+            const sim = cos(it.e, clusters[k].centroid);
+            if (sim >= bestSim) { bestSim = sim; best = k; }
+          }
+          if (best >= 0) {
+            const cl = clusters[best]; cl.members.push(it.id); const m = cl.members.length;
+            for (let d = 0; d < it.e.length; d++) cl.centroid[d] = (cl.centroid[d] * (m - 1) + it.e[d]) / m;
+          } else {
+            clusters.push({ members: [it.id], centroid: it.e.slice() });
+          }
+        }
+        result = {
+          content: clusters.map((cl, i) => ({ cluster_id: `cl-${i}`, members: cl.members, size: cl.members.length })),
+          metadata: { shape: 'cluster', clusters: clusters.length, items: normed.length, max_cluster_size: maxSize, min_similarity: minSim },
+        };
         break;
       }
 

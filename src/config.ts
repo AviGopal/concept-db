@@ -210,6 +210,11 @@ export function loadConfig(): Config {
         // returned tool impulse carries the vessel binding so consumers can
         // dispatch via /mcp/tools/call without per-vessel client code.
         'mcpTool',
+        // Generalization primitives (2026-06-19): composable building blocks so the
+        // substrate can compose generalization itself (embed activities → cluster →
+        // author a generalized capability node). Reuse the local MiniLM model.
+        'embed',
+        'cluster',
       ],
     },
 
