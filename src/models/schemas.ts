@@ -9,7 +9,19 @@ import { z } from 'zod';
 // Source Types
 // =============================================================================
 
-export const SourceTypeSchema = z.enum([
+// source_type is OPEN, not a closed enum. Concepts are universal-data impulses
+// (IMPULSE_ACTIVITY_FOUNDATION): any producer — analysis-vessel writing a
+// code-quality pattern, the substrate's own composition writing a novel
+// category — must be able to feed concept-db without a code change to a
+// hardcoded allow-list. A closed enum was a connectivity barrier: cross-vessel
+// writes carrying an unlisted source_type (e.g. a problem_detection->concept
+// chain) were rejected with `invalid_enum_value`, so the producer/consumer edge
+// never formed. The downstream maps (sourceShapeMap / sourcePriorityDefaults /
+// sourceBudgetDefaults in sources/unified.ts) already fall back gracefully for
+// unknown keys ('unknown' shape, 0.5 priority, 2000 budget), so an arbitrary
+// string is safe. The well-known values below remain the documented vocabulary;
+// they are not enforced.
+export const KNOWN_SOURCE_TYPES = [
   'goal',
   'memo',
   'human_input',
@@ -27,18 +39,12 @@ export const SourceTypeSchema = z.enum([
   // GET /concepts/search?source_type=impulse_activity_pattern
   'vessel_construction_pattern',
   'impulse_activity_pattern',
-  // Pre-lift bootstrap (2026-06-03, openspec change
-  // 2026-06-03-pre-lift-bootstrap-and-architectural-aware-loop):
-  // Architectural pattern / principle concepts. Foundation-doc sections and
-  // operator-articulated insights from session findings are stored under this
-  // source_type so the four horizon detectors
-  // (vessel_responsibility_audit, vessel_architecture_pattern_scan,
-  //  activity_lifecycle_audit, resolver_distribution_audit)
-  // can derive check predicates from concept-db rather than encoding them in
-  // resolver source. Adding a new principle = adding a concept; detectors
-  // pick up the new principle on the next dispatch.
+  // Pre-lift bootstrap (2026-06-03): architectural pattern / principle concepts
+  // feeding the four horizon detectors.
   'architectural_pattern_principle',
-]);
+] as const;
+
+export const SourceTypeSchema = z.string().min(1);
 
 export type SourceType = z.infer<typeof SourceTypeSchema>;
 
