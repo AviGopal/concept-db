@@ -100,6 +100,7 @@ export async function createImpulse(
   const sql = `
     INSERT INTO impulse {
       id: type::thing("impulse", $id),
+      created_at: time::now(),
       pointer: $pointer,
       shape: $shape,
       summary: $summary ?? NONE,
