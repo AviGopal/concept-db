@@ -51,11 +51,20 @@ async function main() {
 
           const content = await readFile(filePath, 'utf-8');
 
-          // Split by semicolons and execute each statement
+          // Split by semicolons and execute each statement. Strip comment
+          // LINES inside each chunk rather than dropping chunks that start
+          // with '--': a statement preceded by its own comment block (every
+          // statement in 004-bm25-search.surql) was previously discarded
+          // whole, so concept_analyzer + the FTS indexes silently never
+          // applied on a fresh datastore (found 2026-07-02 from-zero boot).
           const statements = content
             .split(';')
-            .map(s => s.trim())
-            .filter(s => s && !s.startsWith('--'));
+            .map(s => s
+              .split('\n')
+              .filter(line => !line.trim().startsWith('--'))
+              .join('\n')
+              .trim())
+            .filter(s => s.length > 0);
 
           for (const statement of statements) {
             if (statement) {
