@@ -199,6 +199,7 @@ export function loadConfig(): Config {
         'conceptLink_write',
         'conceptSignatureUpsert_write',
         'conceptUsage_write',
+        'conceptCreditDecontaminate_write',
         'conceptSequence_write',
         // conceptUpkeepAuditLog is emitted by write resolvers as a side-effect
         // impulse; it is not resolvable via pointer dispatch (no case in

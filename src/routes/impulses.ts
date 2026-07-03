@@ -29,6 +29,7 @@ import {
 } from '../resolvers/concept';
 import { getImpulseCooccurrenceEdges, upsertEdge } from '../resolvers/edge';
 import { getUsageStats, recordUsage } from '../resolvers/usage';
+import { decontaminateCredit } from '../resolvers/decontaminate';
 import { getSequenceNeighbors, recordSequence } from '../resolvers/sequence';
 import { createImpulse } from '../resolvers/impulse';
 import { embeddingService } from '../services/embedding';
@@ -932,6 +933,15 @@ impulses.post('/resolve', async (c) => {
           const e = err as Error;
           return c.json({ success: false, error: e.message }, 400);
         }
+      }
+
+      case 'conceptCreditDecontaminate_write': {
+        if (config.auth.requireAuth && !jwtAuth) {
+          return c.json({ success: false, error: 'Authentication required' }, 401);
+        }
+        const deconPointer = pointer as { dry_run?: boolean; min_loads?: number };
+        const deconReport = await decontaminateCredit({ dry_run: deconPointer.dry_run, min_loads: deconPointer.min_loads });
+        return c.json({ success: true, shape: 'conceptCreditDecontaminationReport', body: deconReport });
       }
 
       case 'conceptUsage_write': {
