@@ -839,6 +839,32 @@ export async function upsertBySignature(
 }
 
 /**
+ * Delete a concept and its edges, with orphan-org garbage-collection.
+ */
+export async function deleteConcept(
+  conceptId: string,
+  callerOrgId: string
+): Promise<{ deleted: boolean; status: number; org_id?: string; error?: string }> {
+  const rows = await surrealDB.query<{ id: string; org_id: string }>(
+    'SELECT id, org_id FROM concept WHERE meta::id(id) = $concept_id LIMIT 1',
+    { concept_id: conceptId }
+  );
+  const row = rows[0];
+  if (!row) return { deleted: false, status: 404, error: 'Not found' };
+  const orgIds = await surrealDB.query<string>('SELECT VALUE id FROM organizations');
+  const orphaned = !orgIds.map(String).includes(String(row.org_id));
+  if (String(row.org_id) !== callerOrgId && !orphaned) {
+    return { deleted: false, status: 403, error: 'Forbidden', org_id: String(row.org_id) };
+  }
+  await surrealDB.query(
+    "DELETE concept_edge WHERE from_concept = type::thing('concept', $concept_id) OR to_concept = type::thing('concept', $concept_id)",
+    { concept_id: conceptId }
+  );
+  await surrealDB.query('DELETE concept WHERE meta::id(id) = $concept_id', { concept_id: conceptId });
+  return { deleted: true, status: 200, org_id: String(row.org_id) };
+}
+
+/**
  * Update concept fields
  */
 export async function updateConcept(
