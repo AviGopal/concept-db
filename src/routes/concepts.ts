@@ -42,7 +42,8 @@ const concepts = new Hono();
 concepts.post('/', async (c) => {
   const jwtAuth = getJwtAuthFromContext(c);
 
-  if (config.auth.requireAuth && !jwtAuth) {
+  // Require authentication for creating concepts
+  if (!jwtAuth) {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
@@ -50,6 +51,7 @@ concepts.post('/', async (c) => {
 
   try {
     const body = await c.req.json();
+    const { name, description, org_id, source, source_ref, embedding_hint, tags, metadata } = body;
     const request = CreateConceptRequestSchema.parse(body);
     const concept = await createConcept(request, orgId, jwtAuth?.jwtToken);
     return c.json(concept, 201);
@@ -67,7 +69,8 @@ concepts.post('/', async (c) => {
 concepts.post('/from-source', async (c) => {
   const jwtAuth = getJwtAuthFromContext(c);
 
-  if (config.auth.requireAuth && !jwtAuth) {
+  // Require authentication for from-source
+  if (!jwtAuth) {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
@@ -180,7 +183,7 @@ concepts.get('/search', async (c) => {
 concepts.post('/upsert-by-signature', async (c) => {
   const jwtAuth = getJwtAuthFromContext(c);
 
-  if (config.auth.requireAuth && !jwtAuth) {
+  if (!jwtAuth) {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
@@ -252,7 +255,8 @@ concepts.get('/:id', async (c) => {
 concepts.post('/:id/resolve', async (c) => {
   const jwtAuth = getJwtAuthFromContext(c);
 
-  if (config.auth.requireAuth && !jwtAuth) {
+  // Require authentication for resolving concepts
+  if (!jwtAuth) {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
@@ -286,12 +290,17 @@ concepts.patch('/:id', async (c) => {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
-  const orgId = jwtAuth?.orgId || 'default';
+  // Require authentication for updating concepts
+  if (!jwtAuth) {
+    return c.json({ error: 'Authentication required' }, 401);
+  }
+
+  const orgId = jwtAuth.orgId || 'default';
   const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
 
   try {
     const body = await c.req.json();
-    const concept = await updateConcept(conceptId, body, orgId, jwtAuth?.jwtToken);
+    const concept = await updateConcept(conceptId, body, orgId, jwtAuth.jwtToken);
     return c.json(concept);
   } catch (error) {
     const err = error as Error;
@@ -376,7 +385,12 @@ concepts.post('/:id/link', async (c) => {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
-  const orgId = jwtAuth?.orgId || 'default';
+  // Require authentication for linking concepts
+  if (!jwtAuth) {
+    return c.json({ error: 'Authentication required' }, 401);
+  }
+
+  const orgId = jwtAuth.orgId || 'default';
   const rawFromId = c.req.param('id');
   const fromConceptId = normalizeConceptId(rawFromId) ?? rawFromId;
 
@@ -413,7 +427,12 @@ concepts.post('/:id/usage', async (c) => {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
-  const orgId = jwtAuth?.orgId || 'default';
+  // Require authentication for recording usage
+  if (!jwtAuth) {
+    return c.json({ error: 'Authentication required' }, 401);
+  }
+
+  const orgId = jwtAuth.orgId || 'default';
   const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
 
   try {
@@ -516,7 +535,8 @@ concepts.get('/:id/sequence', async (c) => {
 concepts.post('/sequences', async (c) => {
   const jwtAuth = getJwtAuthFromContext(c);
 
-  if (config.auth.requireAuth && !jwtAuth) {
+  // Require authentication for recording sequences
+  if (!jwtAuth) {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
