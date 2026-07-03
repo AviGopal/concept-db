@@ -29,6 +29,7 @@ export async function decontaminateCredit(request: DecontaminateRequest): Promis
     { min: minLoads },
   );
   const repairs: Array<Record<string, unknown>> = [];
+  const skipped: Array<Record<string, unknown>> = [];
   for (const row of candidates ?? []) {
     const cid = bareId(row.id);
     if (!cid) continue;
@@ -48,12 +49,19 @@ export async function decontaminateCredit(request: DecontaminateRequest): Promis
     if (loaded === before) continue;
     const relevance = (succeeded + 1) / (loaded + 2);
     if (!dryRun) {
-      await surrealDB.query(
-        'UPDATE type::thing("concept", $cid) SET times_loaded = $tl, times_succeeded = $ts, times_failed = $tf, relevance = $rel, created_at = created_at ?? time::now(), updated_at = time::now()',
-        { cid, tl: loaded, ts: succeeded, tf: failed, rel: relevance },
-      );
+      try {
+        await surrealDB.query(
+          'UPDATE type::thing("concept", $cid) SET times_loaded = $tl, times_succeeded = $ts, times_failed = $tf, relevance = $rel, created_at = created_at ?? time::now(), updated_at = time::now()',
+          { cid, tl: loaded, ts: succeeded, tf: failed, rel: relevance },
+        );
+      } catch (err) {
+        // Legacy rows can fail SCHEMAFULL whole-record revalidation (e.g. out-of-enum
+        // source_type). Skip-and-record instead of aborting the whole repair batch.
+        skipped.push({ id: cid, error: err instanceof Error ? err.message.slice(0, 160) : String(err) });
+        continue;
+      }
     }
     repairs.push({ id: cid, loaded_before: before, loaded_after: loaded, succeeded_after: succeeded, relevance_after: relevance });
   }
-  return { dry_run: dryRun, min_loads: minLoads, concepts_examined: (candidates ?? []).length, concepts_repaired: repairs.length, repairs: repairs.slice(0, 50) };
+  return { dry_run: dryRun, min_loads: minLoads, concepts_examined: (candidates ?? []).length, concepts_repaired: repairs.length, update_failed: skipped.length, skipped: skipped.slice(0, 20), repairs: repairs.slice(0, 50) };
 }
