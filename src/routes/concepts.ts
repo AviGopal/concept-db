@@ -16,6 +16,7 @@ import {
   getConceptById,
   updateConcept,
   upsertBySignature,
+  deleteConcept,
 } from '../resolvers/concept';
 import { createEdge, getEdgesForConcept } from '../resolvers/edge';
 import { recordUsage, getUsageHistory, getUsageStats } from '../resolvers/usage';
@@ -552,6 +553,14 @@ concepts.post('/sequences', async (c) => {
     logger.error('Failed to record sequence', { error: err.message });
     return c.json({ error: err.message }, 400);
   }
+});
+
+concepts.delete('/:id', async (c) => {
+  const jwtAuth = getJwtAuthFromContext(c);
+  if (!jwtAuth) return c.json({ error: 'Authentication required' }, 401);
+  const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
+  const result = await deleteConcept(conceptId, jwtAuth.orgId);
+  return c.json(result, result.status as 200 | 403 | 404);
 });
 
 export { concepts };
