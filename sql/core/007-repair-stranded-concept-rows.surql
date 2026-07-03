@@ -11,8 +11,5 @@
 
 DEFINE FIELD OVERWRITE source_type ON concept TYPE string ASSERT string::len($value) > 0;
 
-UPDATE concept SET source_type = 'unknown' WHERE source_type IS NONE;
-
-UPDATE concept SET created_at = updated_at WHERE created_at IS NONE AND updated_at IS NOT NONE;
-
-UPDATE concept SET created_at = time::now() WHERE created_at IS NONE;
+UPDATE concept SET source_type = source_type ?? 'unknown', priority = priority ?? 0.5, scope = scope ?? 'org', created_at = created_at ?? updated_at ?? time::now() WHERE source_type IS NONE OR priority IS NONE OR scope IS NONE OR created_at IS NONE;
+-- Coalesced into one statement so SCHEMAFULL revalidation sees all required fields set on every touched row (fixes concept:0jcr3u5kbes8g8nqxsl8 and concept:halgy2em9lumgivvsat1 which had both priority AND scope NONE).
