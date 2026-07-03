@@ -49,7 +49,7 @@ export async function decontaminateCredit(request: DecontaminateRequest): Promis
     const relevance = (succeeded + 1) / (loaded + 2);
     if (!dryRun) {
       await surrealDB.query(
-        'UPDATE type::thing("concept", $cid) SET times_loaded = $tl, times_succeeded = $ts, times_failed = $tf, relevance = $rel',
+        'UPDATE type::thing("concept", $cid) SET times_loaded = $tl, times_succeeded = $ts, times_failed = $tf, relevance = $rel, created_at = created_at ?? time::now(), updated_at = time::now()',
         { cid, tl: loaded, ts: succeeded, tf: failed, rel: relevance },
       );
     }
