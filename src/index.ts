@@ -245,7 +245,7 @@ async function startup() {
         for (const row of rows) {
           try {
             const rawId = typeof row.id === 'object' ? JSON.stringify(row.id) : String(row.id);
-            const plainId = rawId.replace(/^concept:/, '').replace(/[⟨⟩`"]/g, '');
+            const plainId = rawId.replace(/[⟨⟩`"]/g, '').replace(/^concept:/, '');
             const updates: Record<string, unknown> = {};
             if (row.content) {
               const vec = await embeddingService.embed(String(row.content).slice(0, 2000));
@@ -262,7 +262,7 @@ async function startup() {
             }
             const setClause = Object.keys(updates).map((k) => `${k} = $${k}`).join(', ');
             await surrealDB.query(
-              `UPDATE type::record("concept", $id) SET ${setClause}`,
+              `UPDATE type::thing("concept", $id) SET ${setClause}`,
               { id: plainId, ...updates }
             );
             totalProcessed++;
