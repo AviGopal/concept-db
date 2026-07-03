@@ -569,46 +569,48 @@ async function searchConceptsByDense(
   }
 
   try {
-    const whereClauses = [
-      'org_id = $org_id',
-      '(content_embedding IS NOT NONE OR summary_embedding IS NOT NONE)',
-      ...scalarConditions,
-    ];
-    const candidateSql = `
-      SELECT *, content_embedding, summary_embedding
-      FROM concept
-      WHERE ${whereClauses.join(' AND ')}
-    `;
+    type ConceptRow = Concept & { _dense_score?: number };
 
-    const rows: any[] = jwtToken
-      ? await queryWithAuth<any>(jwtToken, candidateSql, scalarParams)
-      : await surrealDB.query<any>(candidateSql, scalarParams);
+    const baseWhereClauses = ['org_id = $org_id', ...scalarConditions];
+    const queryVecArr = Array.from(queryVec);
 
-    if (!rows || rows.length === 0) return [];
+    const whereClauses = [...baseWhereClauses];
+    const whereStr = whereClauses.join(' AND ');
 
-    // Score in-process
-    const cosine = (a: Float32Array, b: number[]): number => {
-      let dot = 0;
-      for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-      return dot;
-    };
+    const summarySql = `SELECT *, vector::similarity::cosine(summary_embedding, $query_vec) AS _dense_score OMIT content_embedding, summary_embedding FROM concept WHERE ${whereStr} AND summary_embedding IS NOT NONE AND array::len(summary_embedding) = 384 ORDER BY _dense_score DESC LIMIT ${limit}`;
+    const contentSql = `SELECT *, vector::similarity::cosine(content_embedding, $query_vec) AS _dense_score OMIT content_embedding, summary_embedding FROM concept WHERE ${whereStr} AND content_embedding IS NOT NONE AND array::len(content_embedding) = 384 ORDER BY _dense_score DESC LIMIT ${limit}`;
+    const denseParams = { ...scalarParams, query_vec: queryVecArr };
 
-    const scored = rows
-      .map((row) => {
-        let score = 0;
-        if (row.content_embedding?.length === 384) {
-          score = Math.max(score, cosine(queryVec, row.content_embedding));
-        }
-        if (row.summary_embedding?.length === 384) {
-          score = Math.max(score, cosine(queryVec, row.summary_embedding));
-        }
-        return { ...row, _dense_score: score };
-      })
-      .sort((a, b) => b._dense_score - a._dense_score)
+    let summaryRows: ConceptRow[];
+    let contentRows: ConceptRow[];
+    if (jwtToken) {
+      [summaryRows, contentRows] = await Promise.all([
+        queryWithAuth<ConceptRow>(jwtToken, summarySql, denseParams),
+        queryWithAuth<ConceptRow>(jwtToken, contentSql, denseParams),
+      ]);
+    } else {
+      [summaryRows, contentRows] = await Promise.all([
+        surrealDB.query<ConceptRow>(summarySql, denseParams),
+        surrealDB.query<ConceptRow>(contentSql, denseParams),
+      ]);
+    }
+
+    // Merge by taking max _dense_score per id
+    const scoreMap = new Map<string, ConceptRow>();
+    for (const row of [...summaryRows, ...contentRows]) {
+      const rowId = String(row.id);
+      const existing = scoreMap.get(rowId);
+      if (!existing || (row._dense_score ?? 0) > (existing._dense_score ?? 0)) {
+        scoreMap.set(rowId, row);
+      }
+    }
+
+    const scored = Array.from(scoreMap.values())
+      .sort((a, b) => (b._dense_score ?? 0) - (a._dense_score ?? 0))
       .slice(0, limit);
 
     logger.debug('[searchConceptsByDense] completed', {
-      candidateCount: rows.length,
+      candidateCount: summaryRows.length + contentRows.length,
       resultCount: scored.length,
       topScore: scored[0]?._dense_score ?? null,
     });
