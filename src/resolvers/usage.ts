@@ -35,6 +35,21 @@ export async function recordUsage(
   orgId: string,
   jwtToken?: string
 ): Promise<ConceptUsage> {
+  // Refuse synthetic attribution at the write chokepoint (covers REST route,
+  // passive-usage, and impulse callers): unbound {{...}} placeholder trace_ids
+  // carry no execution attribution, and usage rows for nonexistent concepts
+  // are orphans that silently corrupt aggregate stats.
+  const traceIdRaw = String(request.trace_id ?? '');
+  if (traceIdRaw.startsWith('{{') && traceIdRaw.endsWith('}}')) {
+    throw new Error('unbound template placeholder trace_id — usage row refused (no synthetic credit)');
+  }
+  const cidCheck = canonical(request.concept_id);
+  const exists = jwtToken
+    ? await queryWithAuth<{ id: unknown }>(jwtToken, 'SELECT id FROM concept WHERE id = type::thing("concept", $cid) LIMIT 1', { cid: cidCheck })
+    : await surrealDB.query<{ id: unknown }>('SELECT id FROM concept WHERE id = type::thing("concept", $cid) LIMIT 1', { cid: cidCheck });
+  if (!Array.isArray(exists) || exists.length === 0) {
+    throw new Error(`concept not found: ${cidCheck} — usage row refused`);
+  }
   const id = `usage_${nanoid(12)}`;
 
   // Create usage record. activity_id and task_id are declared `option<string>`

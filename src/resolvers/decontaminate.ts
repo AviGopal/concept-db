@@ -41,6 +41,9 @@ export async function decontaminateCredit(request: DecontaminateRequest): Promis
     for (const u of usages ?? []) {
       const t = String(u.trace_id ?? '');
       if (SYNTHETIC_EXACT.has(t) || t.startsWith(SYNTHETIC_PREFIX)) continue;
+      // Unbound template placeholders (literal "{{trace_id}}" etc.) and empty ids are
+      // synthetic too: no execution attribution (written by pre-fix template runs).
+      if (t.length === 0 || (t.startsWith('{{') && t.endsWith('}}'))) continue;
       loaded += 1;
       if (u.outcome === 'success') succeeded += 1;
       else if (u.outcome === 'failure') failed += 1;
