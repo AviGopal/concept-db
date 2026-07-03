@@ -641,6 +641,7 @@ export async function getNeighbors(
   const params: Record<string, unknown> = {
     concept_id,
     limit,
+    org_id: orgId,
   };
 
   let edgeTypeFilter = '';
@@ -669,7 +670,7 @@ export async function getNeighbors(
 
   const sql = `
     SELECT ${neighborProjection}, * FROM concept_edge
-    WHERE ${whereClause} ${edgeTypeFilter}
+    WHERE (${whereClause}) AND org_id = $org_id ${edgeTypeFilter}
     LIMIT $limit
   `;
 
@@ -694,10 +695,10 @@ export async function getNeighbors(
 
   // `id` on concept is a record link; equality against a plain string never matches.
   // Compare via meta::id() so the bare ids from neighborIds line up.
-  const conceptsSql = `SELECT * FROM concept WHERE meta::id(id) IN $ids`;
+  const conceptsSql = `SELECT * FROM concept WHERE meta::id(id) IN $ids AND org_id = $org_id`;
   const concepts = jwtToken
-    ? await queryWithAuth<Concept>(jwtToken, conceptsSql, { ids: neighborIds })
-    : await surrealDB.query<Concept>(conceptsSql, { ids: neighborIds });
+    ? await queryWithAuth<Concept>(jwtToken, conceptsSql, { ids: neighborIds, org_id: orgId })
+    : await surrealDB.query<Concept>(conceptsSql, { ids: neighborIds, org_id: orgId });
 
   // Key the map by bare id (stripped of the "concept:" prefix and any wrapping)
   const conceptMap = new Map(concepts.map(c => [String(c.id).replace(/^concept:/, '').replace(/^⟨|⟩$/g, ''), c]));
