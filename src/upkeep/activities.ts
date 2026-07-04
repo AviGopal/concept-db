@@ -298,6 +298,37 @@ const decayStaleRelevance: UpkeepActivity = {
 };
 
 /**
+ * Prune per-execution telemetry concepts
+ * Trigger: never-loaded impulse_activity_pattern concepts whose content embeds
+ * a volatile execution id — per-event noise, not durable knowledge.
+ */
+const prunePerExecutionConcepts: UpkeepActivity = {
+  id: 'prune-per-execution-concepts',
+  name: 'Prune Per-Execution Concepts',
+  description: 'Delete never-loaded impulse_activity_pattern concepts whose content embeds a volatile execution id',
+  candidateQuery: `
+    SELECT * FROM concept
+    WHERE source_type = 'impulse_activity_pattern'
+      AND content CONTAINS '(execution exec_'
+      AND times_loaded = 0
+    LIMIT 50
+  `,
+  alpha: 1,
+  beta: 1,
+  async execute(candidate: unknown, _orgId: string): Promise<UpkeepResult> {
+    const concept = candidate as Concept;
+    const rawId = String(concept.id);
+    await surrealDB.query('DELETE type::record($rid)', { rid: rawId });
+    logger.info('Pruned per-execution concept', { concept_id: rawId });
+    return {
+      success: true,
+      message: `Pruned per-execution concept ${rawId}`,
+      changes: [{ type: 'deleted', entity: 'concept', id: rawId }],
+    };
+  },
+};
+
+/**
  * All upkeep activities
  */
 export const upkeepActivities: UpkeepActivity[] = [
@@ -306,6 +337,7 @@ export const upkeepActivities: UpkeepActivity[] = [
   adjustPriorityRelevance,
   pruneIrrelevantNeighbors,
   decayStaleRelevance,
+  prunePerExecutionConcepts,
 ];
 
 /**
