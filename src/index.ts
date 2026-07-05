@@ -229,8 +229,8 @@ async function startup() {
       for (;;) {
         let rows: any[];
         try {
-          rows = await surrealDB.query<any>(
-            `SELECT id, content, summary FROM concept WHERE content_embedding IS NONE LIMIT $limit START $offset`,
+          rows = await surrealDB.query<{ id: string; content?: string; summary?: string; has_content_emb: boolean; has_summary_emb: boolean }>(
+            `SELECT id, content, summary, content_embedding != NONE AS has_content_emb, summary_embedding != NONE AS has_summary_emb FROM concept WHERE summary_embedding IS NONE OR (content != NONE AND content_embedding IS NONE) LIMIT $limit START $offset`,
             { limit: batchSize, offset }
           );
         } catch (err) {
@@ -247,14 +247,28 @@ async function startup() {
             const rawId = typeof row.id === 'object' ? JSON.stringify(row.id) : String(row.id);
             const plainId = rawId.replace(/[⟨⟩`"]/g, '').replace(/^concept:/, '');
             const updates: Record<string, unknown> = {};
-            if (row.content) {
-              const vec = await embeddingService.embed(String(row.content).slice(0, 2000));
-              updates.content_embedding = Array.from(vec);
+            if (row.content && !row.has_content_emb) {
+              try {
+                const vec = await embeddingService.embed(row.content);
+                updates.content_embedding = Array.from(vec);
+              } catch (embedError) {
+                logger.warn('[Embedding] Failed to embed content', {
+                  id: row.id,
+                  error: embedError instanceof Error ? embedError.message : String(embedError),
+                });
+              }
             }
             const summaryText = row.summary || String(row.content || '').slice(0, 200);
-            if (summaryText) {
-              const vec = await embeddingService.embed(summaryText);
-              updates.summary_embedding = Array.from(vec);
+            if (summaryText && !row.has_summary_emb) {
+              try {
+                const vec = await embeddingService.embed(summaryText);
+                updates.summary_embedding = Array.from(vec);
+              } catch (embedError) {
+                logger.warn('[Embedding] Failed to embed summary', {
+                  id: row.id,
+                  error: embedError instanceof Error ? embedError.message : String(embedError),
+                });
+              }
             }
             if (Object.keys(updates).length === 0) {
               totalProcessed++;
