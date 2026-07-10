@@ -18,6 +18,7 @@ import { registerLifecycleHooks } from './lifecycle/hooks';
 import { startScheduler, stopScheduler, getSchedulerStatus } from './upkeep/scheduler';
 import { discoveryClient } from './services/discovery-client';
 import { ExecutionObserver } from './services/execution-observer';
+import packageJson from '../package.json';
 import { embeddingService } from './services/embedding';
 
 // Passive listener for activity-api execution events. Constructed at module
@@ -58,7 +59,7 @@ app.get('/health', async (c) => {
     return c.json({
       status: 'healthy',
       service: 'concept-db',
-      version: '0.1.0',
+      version: packageJson.version,
       database: 'connected',
       upkeep: {
         scheduler_running: status.running,
@@ -89,7 +90,7 @@ app.route('/v2/impulses', impulses);
 app.get('/', (c) => {
   return c.json({
     service: 'concept-db',
-    version: '0.1.0',
+    version: packageJson.version,
     description: 'Concept management vessel with graph relationships',
     endpoints: {
       health: '/health',
