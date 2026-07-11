@@ -30,6 +30,7 @@ import {
 import { getImpulseCooccurrenceEdges, upsertEdge } from '../resolvers/edge';
 import { getUsageStats, recordUsage } from '../resolvers/usage';
 import { decontaminateCredit } from '../resolvers/decontaminate';
+import { resolveResolverSchema } from '../resolvers/resolver-schema';
 import { getSequenceNeighbors, recordSequence } from '../resolvers/sequence';
 import { createImpulse } from '../resolvers/impulse';
 import { embeddingService } from '../services/embedding';
@@ -1021,6 +1022,15 @@ impulses.post('/resolve', async (c) => {
           const e = err as Error;
           return c.json({ success: false, error: e.message }, 400);
         }
+      }
+
+      case 'resolver_schema': {
+        const schemaResult = resolveResolverSchema(pointer as { type: 'resolver_schema'; shape: string });
+        result = {
+          content: schemaResult,
+          metadata: { shape: 'resolverSchema', summary: `input schema for ${pointer.shape}` },
+        };
+        break;
       }
 
       default:
