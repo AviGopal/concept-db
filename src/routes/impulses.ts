@@ -26,6 +26,7 @@ import {
   getConceptById,
   upsertBySignature,
   createConcept,
+  searchConcepts,
 } from '../resolvers/concept';
 import { getImpulseCooccurrenceEdges, upsertEdge } from '../resolvers/edge';
 import { getUsageStats, recordUsage } from '../resolvers/usage';
@@ -409,8 +410,27 @@ impulses.post('/resolve', async (c) => {
     switch (shape) {
       case 'concept': {
         if (!pointer.concept_id) {
+          if (pointer.query || pointer.shape || pointer.source_type) {
+            const results = await searchConcepts(
+              {
+                query: pointer.query,
+                shape: pointer.shape,
+                source_type: pointer.source_type,
+                min_relevance: pointer.min_relevance,
+                limit: pointer.limit ?? 20,
+                offset: pointer.offset ?? 0,
+              },
+              orgId,
+              jwtToken,
+            );
+            result = {
+              content: results,
+              metadata: { shape: 'concept', count: results.length },
+            };
+            break;
+          }
           return c.json(
-            { error: 'pointer.concept_id is required for shape "concept"' },
+            { error: 'pointer.concept_id is required for shape "concept" (provide concept_id, or query/shape/source_type to search)' },
             400,
           );
         }
@@ -1024,7 +1044,8 @@ impulses.post('/resolve', async (c) => {
         }
       }
 
-      case 'resolver_schema': {
+      // @shape-dispatch:private
+    case 'resolver_schema': {
         const schemaResult = resolveResolverSchema(pointer as { type: 'resolver_schema'; shape: string });
         result = {
           content: schemaResult,
