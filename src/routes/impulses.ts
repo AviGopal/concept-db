@@ -499,7 +499,12 @@ impulses.post('/resolve', async (c) => {
         break;
       }
 
-      case 'relatedConcepts': {
+      case 'conceptSearch': {
+  const rows = await searchConcepts({ offset: 0, query: pointer.query, source_type: pointer.source_type, shape: pointer.shape, min_relevance: pointer.min_relevance, limit: pointer.limit ?? 20 }, orgId, jwtToken);
+  result = { content: rows, metadata: { shape: 'conceptSearch', count: rows.length } };
+  break;
+}
+case 'relatedConcepts': {
         if (!pointer.concept_id) {
           return c.json(
             { error: 'pointer.concept_id is required for shape "relatedConcepts"' },
