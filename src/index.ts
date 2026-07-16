@@ -153,6 +153,40 @@ app.onError((err, c) => {
 });
 
 // Startup
+function log(level: string, msg: string): void {
+  console.log(`[${level}] ${msg}`);
+}
+
+async function healthCheck(): Promise<{ shape: string; body: { ok: boolean; ts: number } }> {
+  let ok = false;
+  try {
+    ok = (surrealDB as any).isOpen();
+  } catch (e) {
+    log("error", `health check failed: ${(e as Error).message}`);
+  }
+  return { shape: "vesselHealth", body: { ok, ts: Date.now() } };
+}
+
+log("info", "starting concept-db initialization");
+let db: typeof surrealDB;
+try {
+  const dep = { app, config };
+  if (!dep) throw new Error("dependency loading returned null");
+  log("info", "dependencies loaded");
+  db = surrealDB;
+  await db.connect();
+  log("info", "database connection established");
+} catch (e) {
+  log("error", `initialization failed: ${(e as Error).message}`);
+  throw e;
+}
+const health = await healthCheck();
+if (!health.body.ok) {
+  log("error", "health check reports unhealthy state");
+  throw new Error("initial health check failed");
+}
+log("info", "health check passed");
+
 async function startup() {
   logger.info('Starting concept-db vessel', {
     port: config.port,
