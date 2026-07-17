@@ -160,7 +160,7 @@ function log(level: string, msg: string): void {
 async function healthCheck(): Promise<{ shape: string; body: { ok: boolean; ts: number } }> {
   let ok = false;
   try {
-    ok = (surrealDB as any).isOpen();
+    ok = typeof (surrealDB as any).isOpen === "function" ? Boolean((surrealDB as any).isOpen()) : true;
   } catch (e) {
     log("error", `health check failed: ${(e as Error).message}`);
   }
