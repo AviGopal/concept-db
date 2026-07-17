@@ -569,16 +569,25 @@ async function searchConceptsByDense(
   }
 
   try {
-    type ConceptRow = Concept & { _dense_score?: number };
+    type ConceptRow = Concept & { _dense_score?: number; _dense_dist?: number };
 
-    const baseWhereClauses = ['org_id = $org_id', ...scalarConditions];
     const queryVecArr = Array.from(queryVec);
 
-    const whereClauses = [...baseWhereClauses];
-    const whereStr = whereClauses.join(' AND ');
+    // Index-backed KNN via the HNSW indexes defined in
+    // sql/core/009-hnsw-embedding-index.surql. The `<|K,EF|>` operator returns
+    // the K nearest neighbours through the index — NOT a full-table cosine scan
+    // (which materialised every row's `content` and OOM-killed surreal). Scalar
+    // filters (org_id + optional shape/source_type/min_relevance) are applied on
+    // top of the KNN candidates; K is the caller's over-fetch (fetchLimit), so
+    // post-filtering still leaves ample candidates. EF (search breadth) >= K for
+    // recall. Rows lacking a valid 384-dim embedding simply aren't in the index,
+    // so the previous `IS NOT NONE`/`array::len = 384` guards are unnecessary.
+    const filterConditions = ['org_id = $org_id', ...scalarConditions];
+    const filterStr = ` AND ${filterConditions.join(' AND ')}`;
+    const ef = Math.max(limit * 2, 64);
 
-    const summarySql = `SELECT *, vector::similarity::cosine(summary_embedding, $query_vec) AS _dense_score OMIT content_embedding, summary_embedding FROM concept WHERE ${whereStr} AND summary_embedding IS NOT NONE AND array::len(summary_embedding) = 384 ORDER BY _dense_score DESC LIMIT ${limit}`;
-    const contentSql = `SELECT *, vector::similarity::cosine(content_embedding, $query_vec) AS _dense_score OMIT content_embedding, summary_embedding FROM concept WHERE ${whereStr} AND content_embedding IS NOT NONE AND array::len(content_embedding) = 384 ORDER BY _dense_score DESC LIMIT ${limit}`;
+    const summarySql = `SELECT *, vector::distance::knn() AS _dense_dist OMIT content_embedding, summary_embedding FROM concept WHERE summary_embedding <|${limit},${ef}|> $query_vec${filterStr} ORDER BY _dense_dist LIMIT ${limit}`;
+    const contentSql = `SELECT *, vector::distance::knn() AS _dense_dist OMIT content_embedding, summary_embedding FROM concept WHERE content_embedding <|${limit},${ef}|> $query_vec${filterStr} ORDER BY _dense_dist LIMIT ${limit}`;
     const denseParams = { ...scalarParams, query_vec: queryVecArr };
 
     let summaryRows: ConceptRow[];
@@ -593,6 +602,13 @@ async function searchConceptsByDense(
         surrealDB.query<ConceptRow>(summarySql, denseParams),
         surrealDB.query<ConceptRow>(contentSql, denseParams),
       ]);
+    }
+
+    // KNN returns cosine DISTANCE (lower = closer); convert to a similarity
+    // score (higher = better) so the downstream max-merge, sort, and RRF ranking
+    // keep their original semantics. cosine similarity = 1 - cosine distance.
+    for (const row of [...summaryRows, ...contentRows]) {
+      row._dense_score = 1 - (row._dense_dist ?? 1);
     }
 
     // Merge by taking max _dense_score per id
