@@ -37,3 +37,8 @@ coverage/
 tmp/
 temp/
 *.tmp
+
+# local deploy helper (untracked ops script)
+deploy-hnsw-fix-local.sh
+recover-hnsw-deploy.sh
+redeploy-009-summary-index.sh
