@@ -1,9 +1,5 @@
 /**
- * concept-db: Concept Management Vessel
- *
- * A vessel that manages concepts as impulses with graph relationships.
- * Exposes MCP tools, runs autonomous upkeep activities via Thompson Sampling,
- * and integrates with the impulse/trace learning system.
+ * concept-db: Concept Management Vessel — resolver for the concept graph and prose knowledge
  */
 
 import { Hono } from 'hono';
