@@ -47,8 +47,8 @@ app.use('*', jwtAuthMiddleware);
 // Health check
 app.get('/health', async (c) => {
   try {
-    // Check database connection (INFO FOR DB is valid SurrealDB syntax)
-    await surrealDB.query('INFO FOR DB');
+    // Cheap database liveness probe (avoids enumerating schema)
+    await surrealDB.query('RETURN 1');
 
     const status = getSchedulerStatus();
 
