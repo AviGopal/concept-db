@@ -164,24 +164,47 @@ async function healthCheck(): Promise<{ shape: string; body: { ok: boolean; ts: 
 }
 
 log("info", "starting concept-db initialization");
-let db: typeof surrealDB;
-try {
+
+// Non-blocking background retry loop for initial SurrealDB connection
+// Runs without blocking module evaluation so HTTP listener binds and discovery
+// registration fires regardless of SurrealDB state; DB connection converges once
+// SurrealDB becomes reachable.
+(async () => {
   const dep = { app, config };
-  if (!dep) throw new Error("dependency loading returned null");
+  if (!dep) {
+    log("error", "dependency loading returned null");
+    return;
+  }
   log("info", "dependencies loaded");
-  db = surrealDB;
-  await db.connect();
-  log("info", "database connection established");
-} catch (e) {
-  log("error", `initialization failed: ${(e as Error).message}`);
-  throw e;
-}
-const health = await healthCheck();
-if (!health.body.ok) {
-  log("error", "health check reports unhealthy state");
-  throw new Error("initial health check failed");
-}
-log("info", "health check passed");
+
+  const maxRetries = 10;
+  const delayMs = 1000;
+  let attempt = 0;
+  let connected = false;
+
+  while (attempt < maxRetries && !connected) {
+    attempt++;
+    try {
+      await surrealDB.connect();
+      log("info", "database connection established");
+      connected = true;
+    } catch (e) {
+      if (attempt >= maxRetries) {
+        log("error", `initialization failed after ${maxRetries} attempts: ${(e as Error).message}`);
+        throw e;
+      }
+      log("warn", `SurrealDB connection attempt ${attempt} failed, retrying in ${delayMs}ms: ${(e as Error).message}`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+
+  const health = await healthCheck();
+  if (!health.body.ok) {
+    log("error", "health check reports unhealthy state");
+    throw new Error("initial health check failed");
+  }
+  log("info", "health check passed");
+})();
 
 async function startup() {
   logger.info('Starting concept-db vessel', {
