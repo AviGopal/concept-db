@@ -19,6 +19,32 @@ async function main() {
   console.log(`  Namespace: ${SURREAL_NS}`);
   console.log(`  Database: ${SURREAL_DB}`);
 
+  // Bounded reachability gate: the SurrealDB SDK connect() can hang indefinitely
+  // when the store is down/contended, and this script runs as concept-db's
+  // ExecStartPre — a hang would eat the unit's start budget -> SIGKILL. Poll HTTP
+  // /health with a per-try timeout up to a generous cold-boot bound; if the store
+  // never answers, skip schema apply and exit 0 (NON-fatal). The unit's
+  // ExecStartPre carries a `-` prefix and the server converges once SurrealDB is
+  // up; on a live DB the schema is already applied (idempotent DEFINE IF NOT
+  // EXISTS), so nothing is lost by skipping.
+  const reachable = await (async () => {
+    for (let i = 0; i < 40; i++) {
+      try {
+        const r = await fetch(`${SURREAL_URL}/health`, { signal: AbortSignal.timeout(5000) });
+        if (r.ok) return true;
+      } catch { /* retry */ }
+      await new Promise(res => setTimeout(res, 1000));
+    }
+    return false;
+  })();
+  if (!reachable) {
+    console.warn(
+      '[apply-schema] SurrealDB unreachable within bounded 40s wait — skipping schema ' +
+      'apply (non-fatal). Server will serve and converge; a live DB is already migrated.'
+    );
+    process.exit(0);
+  }
+
   const db = new Surreal();
 
   try {
