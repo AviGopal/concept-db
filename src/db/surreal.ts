@@ -25,6 +25,24 @@ function isAuthExpiryError(err: unknown): boolean {
   return AUTH_ERROR_FRAGMENTS.some((f) => msg.includes(f));
 }
 
+// Admission control (2026-07-24): a single embedded RocksDB node has no per-query
+// memory cap, so N concurrent heavy queries SUM into RAM and OOM instead of queueing.
+// Bounds concurrent in-flight db.query() calls; over the cap, callers await a slot.
+class QuerySemaphore {
+  private slots: number;
+  private waiters: Array<() => void> = [];
+  constructor(max: number) { this.slots = max; }
+  async acquire(): Promise<void> {
+    if (this.slots > 0) { this.slots--; return; }
+    await new Promise<void>((resolve) => { this.waiters.push(resolve); });
+  }
+  release(): void {
+    const next = this.waiters.shift();
+    if (next) next(); else this.slots++;
+  }
+}
+const querySem = new QuerySemaphore(Number(process.env.SURREAL_MAX_CONCURRENT_QUERIES ?? 16));
+
 class SurrealDBClient {
   private db: Surreal | null = null;
   private connecting: Promise<void> | null = null;
@@ -128,7 +146,9 @@ class SurrealDBClient {
 
     const run = async () => {
       logger.debug('Executing SurrealDB query', { sql, params });
-      const result = await this.db!.query(sql, params);
+      await querySem.acquire();
+      let result;
+      try { result = await this.db!.query(sql, params); } finally { querySem.release(); }
       const firstResult = Array.isArray(result) && result.length > 0 ? result[0] : [];
       return firstResult as T[];
     };
