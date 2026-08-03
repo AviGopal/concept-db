@@ -2,7 +2,7 @@
  * Discovery Vessel Client (concept-db)
  *
  * Manages registration, heartbeat, and deregistration with discovery-vessel.
- * Adapted from metabob-activity-api's discovery-client:
+ * Adapted from activity-api's discovery-client:
  *   - Advertises concept-db's shapes (concept, conceptGraph, relatedConcepts,
  *     conceptUsageStats, conceptSequence).
  *   - Authenticates with discovery-vessel using the Metabob API key

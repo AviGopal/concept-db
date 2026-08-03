@@ -1,7 +1,7 @@
 /**
  * Execution Observer
  *
- * Passive WebSocket client of metabob-activity-api. Listens for activity
+ * Passive WebSocket client of activity-api. Listens for activity
  * execution events (task.completed, tool.call) across vessels and, when an
  * event references a concept that concept-db owns, records a usage signal
  * via `recordUsage` so the concept's learning metrics reflect cross-vessel

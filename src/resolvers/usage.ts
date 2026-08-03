@@ -149,7 +149,7 @@ async function updateConceptMetrics(
 }
 
 /**
- * Forward usage to metabob-activity-api for impulse relevance tracking
+ * Forward usage to activity-api for impulse relevance tracking
  */
 async function forwardToActivityApi(
   request: RecordUsageRequest,
