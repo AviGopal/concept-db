@@ -12,6 +12,7 @@ import { lifecycleDispatcher } from '../lifecycle/dispatcher';
 import { embeddingService } from '../services/embedding';
 import { mergeByRRF } from '../utils/rrf';
 import { normalizeConceptId } from '../services/passive-usage';
+import { searchTermLadder } from './search-terms';
 import type {
   Concept,
   CreateConceptRequest,
@@ -25,6 +26,9 @@ import type {
 /**
  * Infer shape from source type if not provided
  */
+/** Substituted per relaxation rung so the SQL is built once. */
+const FTS_TERM_PLACEHOLDER = '__FTS_TERM__';
+
 function inferShape(sourceType: SourceType, explicitShape?: string): string {
   if (explicitShape) return explicitShape;
 
@@ -389,6 +393,7 @@ export async function searchConcepts(
   // Two separate queries (one per field) because OR'd @@ expressions also fail.
   //   Query A (content, weight 1×): search::score(0) references the single @@
   //   Query B (summary, weight 2×): search::score(0) references the single @@
+  // The term is substituted per relaxation rung below; the SQL is built once.
   const safeQueryTerm = request.query
     .replace(/['"\\]/g, ' ')  // strip quotes and backslashes
     .replace(/\s+/g, ' ')
@@ -398,7 +403,7 @@ export async function searchConcepts(
   const contentSql = `
     SELECT *, search::score(0) AS fts_score
     FROM concept
-    WHERE content @@ '${safeQueryTerm}' AND org_id = $org_id${scalarWhere}
+    WHERE content @@ '__FTS_TERM__' AND org_id = $org_id${scalarWhere}
     ORDER BY fts_score DESC
     LIMIT $limit
     START $offset
@@ -407,7 +412,7 @@ export async function searchConcepts(
   const summarySql = `
     SELECT *, search::score(0) AS fts_score
     FROM concept
-    WHERE summary @@ '${safeQueryTerm}' AND org_id = $org_id${scalarWhere}
+    WHERE summary @@ '__FTS_TERM__' AND org_id = $org_id${scalarWhere}
     ORDER BY fts_score DESC
     LIMIT $limit
     START $offset
@@ -427,11 +432,43 @@ export async function searchConcepts(
       return [] as Concept[];
     });
 
-  const [contentRaw, summaryRaw, denseResults] = await Promise.all([
-    runQuery(contentSql),
-    runQuery(summarySql),
-    searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken),
-  ]);
+  // PROGRESSIVE RELAXATION over term-sets.
+  //
+  // `@@` is AND, not OR: every analysed term must be present. Proven against the live
+  // index — "anchor" 2 rows, "verbatim" 2 rows, "anchor verbatim" 1 row (the
+  // intersection), "anchor verbatim zzqqxx" 0 rows. The sanitiser above caps the term
+  // at 200 CHARACTERS but never caps TERMS, so a real query (a spec, a goal, a gap
+  // summary) arrives as ~30 terms that no single row contains and matches nothing:
+  // 25 chars returned a row; 50, 80, 120, 160, 200 and 280 all returned none.
+  //
+  // So every consumer with genuine text to search with silently got zero and fell
+  // back. Try the original term-set first — unchanged behaviour for queries that
+  // already work — then the 3, 2 and 1 most distinctive terms, stopping at the first
+  // rung that matches. The first non-empty rung is the most specific available, not
+  // the widest.
+  const ladder = searchTermLadder(request.query);
+  let contentRaw: Concept[] = [];
+  let summaryRaw: Concept[] = [];
+  let usedRung = '';
+  const densePromise = searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken);
+  for (const rung of (ladder.length > 0 ? ladder : [safeQueryTerm])) {
+    const esc = rung.replace(/['"\\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+    if (!esc) continue;
+    [contentRaw, summaryRaw] = await Promise.all([
+      runQuery(contentSql.replace(FTS_TERM_PLACEHOLDER, esc)),
+      runQuery(summarySql.replace(FTS_TERM_PLACEHOLDER, esc)),
+    ]);
+    usedRung = esc;
+    if (contentRaw.length > 0 || summaryRaw.length > 0) break;
+  }
+  if (usedRung && usedRung !== safeQueryTerm) {
+    logger.info('[searchConcepts] relaxed the term-set to match', {
+      original_terms: safeQueryTerm.split(' ').length,
+      used: usedRung,
+      hits: contentRaw.length + summaryRaw.length,
+    });
+  }
+  const denseResults = await densePromise;
 
   // Merge content and summary BM25 results: summary matches weighted 2×.
   // Deduplicate by ID, combining scores for concepts that match both fields.
