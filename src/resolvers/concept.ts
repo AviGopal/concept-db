@@ -468,7 +468,45 @@ export async function searchConcepts(
       hits: contentRaw.length + summaryRaw.length,
     });
   }
-  const denseResults = await densePromise;
+  // BOUND THE DENSE LEG — it is an ENRICHMENT, and it was holding the whole search hostage.
+  //
+  // Measured 2026-08-15 against the live store (56,216 concept rows), and the numbers are not
+  // close:
+  //
+  //   FTS in SurrealDB directly ("content @0@@ ..." + score + ORDER BY)   ~242 ms
+  //   SELECT count() FROM concept GROUP ALL                               ~952 ms
+  //   this resolver over HTTP, one single-term query                    8,800 ms  -> 31,900 ms
+  //   two queries in parallel (what the walk actually issues)          34,200 ms / 40,000 ms
+  //
+  // The database is fast. The time is spent HERE, in searchConceptsByDense, which calls
+  // embeddingService.embed() — local ONNX inference (all-MiniLM-L6-v2) over the query text — on
+  // every single search, competing for CPU with surreal (measured at 161 % of one core by a 20 s
+  // delta, 5.2 GB RSS) and the rest of the fleet. Under substrate load it degrades ~4×, which is
+  // why the failure looks like flakiness and is really contention.
+  //
+  // The consequence was total: goal-host's walk recall budgets 10 s, so an 8.8 s floor rising to
+  // 32 s meant "[walk-concepts] concept-db could not be asked" on essentially every dispatch —
+  // the substrate could not read its own lessons at the moment of use (law 8), and could not tell
+  // that outcome apart from an empty knowledge store. Raising client timeouts cannot fix a 32 s
+  // floor; the fix has to be here.
+  //
+  // So: give dense a bounded window and fall back to lexical-only when it misses it. This is a
+  // pure availability trade — the FTS ladder above has already produced the matches, and dense
+  // only re-ranks and adds semantic neighbours. Late enrichment is worth strictly less than a
+  // result that arrives before the caller's deadline, because a result that misses the deadline
+  // is worth zero. Timing out is LOGGED rather than silent, so "dense is chronically late" stays
+  // an observable fact instead of an inferred one.
+  const DENSE_BUDGET_MS = Number(process.env.CONCEPT_DENSE_BUDGET_MS ?? 2000);
+  const denseResults = await Promise.race([
+    densePromise,
+    new Promise<Concept[]>(resolve => setTimeout(() => resolve([]), DENSE_BUDGET_MS)),
+  ]).catch(() => [] as Concept[]);
+  if (denseResults.length === 0) {
+    logger.info('[searchConcepts] dense leg returned nothing within its budget — serving lexical results only', {
+      budget_ms: DENSE_BUDGET_MS,
+      lexical_hits: contentRaw.length + summaryRaw.length,
+    });
+  }
 
   // Merge content and summary BM25 results: summary matches weighted 2×.
   // Deduplicate by ID, combining scores for concepts that match both fields.
