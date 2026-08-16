@@ -78,5 +78,33 @@ export function searchTermLadder(query: string): string[] {
   if (terms.length > 3) push(terms.slice(0, 3).join(" "));
   if (terms.length > 2) push(terms.slice(0, 2).join(" "));
   if (terms.length > 1) push(terms[0]!);
+  // THE LAST RUNG MUST NOT DROP THE SUBJECT (2026-08-16).
+  //
+  // Terms are ordered by LENGTH as a rarity proxy, which holds for the identifier-heavy
+  // lessons this was written for (`anchor_not_found` beats `error`) and inverts for prose
+  // questions, where the long words are the generic ones. Measured against the live store:
+  //
+  //   query "astronomical distance ganymede"
+  //     ladder -> ["astronomical distance ganymede", "astronomical distance", "astronomical"]
+  //     hits   ->  0                                  0                        0
+  //   but the DROPPED term retrieves it:
+  //     "ganymede" -> 1 hit (the NAIF-id concept the walk needed)
+  //
+  // Every rung narrowed toward the most generic word and discarded the only discriminating
+  // one, so a seeded fact sat in the store and was unreachable by the phrasing that needed it.
+  //
+  // Append the query's LAST distinctive term as a final rung. Word order carries specificity in
+  // English noun phrases — "astronomical distance ganymede" is about ganymede, "horizons naif id"
+  // is about the id — so the trailing term is the subject far more often than the longest one is.
+  // Appended rather than substituted: every existing rung is tried first in its existing order,
+  // so this can only ADD recall, never change what a working query already returns. `push`
+  // dedupes, so a single-term query is unaffected.
+  if (terms.length > 1) {
+    // `terms` is sorted by length; recover the term that appeared LAST in the original query.
+    const inQueryOrder = query.split(/[^A-Za-z0-9_.$-]+/).map((t) => t.trim()).filter(Boolean);
+    const termSet = new Set(terms.map((t) => t.toLowerCase()));
+    const trailing = [...inQueryOrder].reverse().find((t) => termSet.has(t.toLowerCase()));
+    if (trailing) push(trailing);
+  }
   return rungs;
 }
