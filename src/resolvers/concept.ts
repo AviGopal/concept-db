@@ -450,7 +450,21 @@ export async function searchConcepts(
   let contentRaw: Concept[] = [];
   let summaryRaw: Concept[] = [];
   let usedRung = '';
-  const densePromise = searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken);
+  // DO NOT START THE DENSE LEG UNTIL THE LEXICAL LADDER HAS FAILED.
+  //
+  // The budget below bounds how long we WAIT for dense; it does not bound the WORK. Promise.race
+  // resolves early and leaves searchConceptsByDense running, so the local ONNX embedding keeps
+  // burning CPU in-process — competing with the very FTS queries in the ladder below, which are
+  // what actually produce the answer. Measured 2026-08-16 after the budget landed: the dense leg
+  // dutifully logged "returned nothing within its budget {budget_ms: 2000}" and the whole resolve
+  // still took 11.97 s against goal-host's 10 s recall abort, so law 8's channel stayed dark and
+  // the walk went on logging "concept-db could not be asked" on every dispatch.
+  //
+  // In every one of those logs the LEXICAL ladder had hits (3, 2, 1). So dense was not merely late,
+  // it was unnecessary work that slowed down the leg that was succeeding. Starting it lazily costs
+  // nothing when lexical matches — the common case — and preserves it exactly as before when
+  // lexical finds nothing, which is the case it was added for.
+  let densePromise: Promise<Concept[]> | null = null;
   for (const rung of (ladder.length > 0 ? ladder : [safeQueryTerm])) {
     const esc = rung.replace(/['"\\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
     if (!esc) continue;
@@ -497,15 +511,24 @@ export async function searchConcepts(
   // is worth zero. Timing out is LOGGED rather than silent, so "dense is chronically late" stays
   // an observable fact instead of an inferred one.
   const DENSE_BUDGET_MS = Number(process.env.CONCEPT_DENSE_BUDGET_MS ?? 2000);
-  const denseResults = await Promise.race([
-    densePromise,
-    new Promise<Concept[]>(resolve => setTimeout(() => resolve([]), DENSE_BUDGET_MS)),
-  ]).catch(() => [] as Concept[]);
-  if (denseResults.length === 0) {
-    logger.info('[searchConcepts] dense leg returned nothing within its budget — serving lexical results only', {
-      budget_ms: DENSE_BUDGET_MS,
-      lexical_hits: contentRaw.length + summaryRaw.length,
+  const lexicalHits = contentRaw.length + summaryRaw.length;
+  let denseResults: Concept[] = [];
+  if (lexicalHits > 0) {
+    logger.info('[searchConcepts] lexical ladder matched — skipping the dense leg entirely', {
+      lexical_hits: lexicalHits,
     });
+  } else {
+    densePromise = searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken);
+    denseResults = await Promise.race([
+      densePromise,
+      new Promise<Concept[]>(resolve => setTimeout(() => resolve([]), DENSE_BUDGET_MS)),
+    ]).catch(() => [] as Concept[]);
+    if (denseResults.length === 0) {
+      logger.info('[searchConcepts] dense leg returned nothing within its budget — serving lexical results only', {
+        budget_ms: DENSE_BUDGET_MS,
+        lexical_hits: lexicalHits,
+      });
+    }
   }
 
   // Merge content and summary BM25 results: summary matches weighted 2×.
