@@ -59,7 +59,7 @@ app.get('/health', async (c) => {
       database: 'connected',
       upkeep: {
         scheduler_running: status.running,
-        enabled: process.env.DENSE_BACKFILL_ENABLED === 'true' ? status.enabled : false,
+        enabled: status.enabled,
       },
       embedding: embeddingService.getStatus(),
       timestamp: new Date().toISOString(),
