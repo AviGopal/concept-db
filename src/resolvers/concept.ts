@@ -680,26 +680,71 @@ async function searchConceptsByDense(
     // post-filtering still leaves ample candidates. EF (search breadth) >= K for
     // recall. Rows lacking a valid 384-dim embedding simply aren't in the index,
     // so the previous `IS NOT NONE`/`array::len = 384` guards are unnecessary.
+    // A SCALAR FILTER ALONGSIDE `<|K,EF|>` DEFEATS THE HNSW INDEX (measured 2026-08-30).
+    //
+    // This query used to carry `AND org_id = $org_id` inline with the KNN operator. Timed against
+    // the live store with the same stored vector, isolating one variable at a time:
+    //
+    //   SELECT id  + KNN, no filter ......   112 ms
+    //   SELECT *   + KNN, no filter ......   164 ms
+    //   SELECT id  + KNN + org filter ....  47.9 s      <-- the filter, not the projection
+    //   production query (both) .........   41.0 s
+    //
+    // ~400x. `SELECT *` was never the problem. With a scalar condition attached, the planner stops
+    // using the index and scans 63,970 rows that each carry two 384-float vectors. The dense leg
+    // budgets 2000 ms, so it could NEVER return — which is why the log recorded "dense leg returned
+    // nothing within its budget" 15-20k times a day for at least five days while every component it
+    // depends on (index, embeddings, ONNX model) was healthy.
+    //
+    // Split into two stages: an UNFILTERED KNN that the index can serve, then the scalar filter
+    // applied to that small candidate set. Measured end-to-end at ~840 ms, ~57x faster.
+    //
+    // THE FILTER STAYS IN SQL. It is tenant isolation, and CLAUDE.md is explicit that isolation is
+    // enforced in the database via PERMISSIONS on $token.org_id and never in application code — the
+    // root-credential path below has no PERMISSIONS backstop, so moving org filtering into
+    // TypeScript would be a cross-tenant leak, not an optimisation.
+    //
+    // This is also what the comment above always said the design was ("K is the caller's over-fetch,
+    // so post-filtering still leaves ample candidates") — the code just never did it. K is now a
+    // real over-fetch so post-filtering still fills the page.
     const filterConditions = ['org_id = $org_id', ...scalarConditions];
     const filterStr = ` AND ${filterConditions.join(' AND ')}`;
-    const ef = Math.max(limit * 2, 64);
-
-    const summarySql = `SELECT *, vector::distance::knn() AS _dense_dist OMIT content_embedding, summary_embedding FROM concept WHERE summary_embedding <|${limit},${ef}|> $query_vec${filterStr} ORDER BY _dense_dist LIMIT ${limit}`;
-    const contentSql = `SELECT *, vector::distance::knn() AS _dense_dist OMIT content_embedding, summary_embedding FROM concept WHERE content_embedding <|${limit},${ef}|> $query_vec${filterStr} ORDER BY _dense_dist LIMIT ${limit}`;
+    const knnK = Math.max(limit * 4, 32);
+    const ef = Math.max(knnK * 2, 64);
     const denseParams = { ...scalarParams, query_vec: queryVecArr };
 
-    let summaryRows: ConceptRow[];
-    let contentRows: ConceptRow[];
-    if (jwtToken) {
-      [summaryRows, contentRows] = await Promise.all([
-        queryWithAuth<ConceptRow>(jwtToken, summarySql, denseParams),
-        queryWithAuth<ConceptRow>(jwtToken, contentSql, denseParams),
-      ]);
-    } else {
-      [summaryRows, contentRows] = await Promise.all([
-        surrealDB.query<ConceptRow>(summarySql, denseParams),
-        surrealDB.query<ConceptRow>(contentSql, denseParams),
-      ]);
+    // Stage 1 — pure KNN, no scalar conditions, so the HNSW index is used.
+    const knnSql = (field: string) =>
+      `SELECT id, vector::distance::knn() AS _dense_dist FROM concept WHERE ${field} <|${knnK},${ef}|> $query_vec`;
+    // Stage 2 — hydrate and filter the candidate set (small, so this is index-irrelevant).
+    const hydrateSql = `SELECT * OMIT content_embedding, summary_embedding FROM concept WHERE id IN $ids${filterStr}`;
+
+    const runQuery = <T>(sql: string, params: Record<string, unknown>): Promise<T[]> =>
+      jwtToken ? queryWithAuth<T>(jwtToken, sql, params) : surrealDB.query<T>(sql, params);
+
+    const [summaryKnn, contentKnn] = await Promise.all([
+      runQuery<{ id: unknown; _dense_dist?: number }>(knnSql('summary_embedding'), denseParams),
+      runQuery<{ id: unknown; _dense_dist?: number }>(knnSql('content_embedding'), denseParams),
+    ]);
+
+    // Keep the best (smallest) distance per id across both vector fields before hydrating, so one
+    // row is fetched once even when it ranks in both legs.
+    const distById = new Map<string, number>();
+    for (const r of [...summaryKnn, ...contentKnn]) {
+      const k = String(r.id);
+      const d = r._dense_dist ?? 1;
+      if (!distById.has(k) || d < (distById.get(k) as number)) distById.set(k, d);
+    }
+
+    let summaryRows: ConceptRow[] = [];
+    let contentRows: ConceptRow[] = [];
+    if (distById.size > 0) {
+      const ids = [...new Set([...summaryKnn, ...contentKnn].map((r) => r.id))];
+      const hydrated = await runQuery<ConceptRow>(hydrateSql, { ...denseParams, ids });
+      // Re-attach the distance the KNN computed; stage 2 cannot recompute it.
+      for (const row of hydrated) row._dense_dist = distById.get(String(row.id)) ?? 1;
+      summaryRows = hydrated;
+      contentRows = [];
     }
 
     // KNN returns cosine DISTANCE (lower = closer); convert to a similarity
