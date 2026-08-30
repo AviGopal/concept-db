@@ -222,13 +222,20 @@ export const surrealDB = new SurrealDBClient();
 export async function createAuthenticatedClient(jwtToken: string): Promise<Surreal> {
   const db = new Surreal();
 
-  await db.connect(config.surrealdb.url);
-  await db.use({
-    namespace: config.surrealdb.namespace,
-    database: config.surrealdb.database,
-  });
+  try {
+    await db.connect(config.surrealdb.url);
+    await db.use({
+      namespace: config.surrealdb.namespace,
+      database: config.surrealdb.database,
+    });
 
-  await db.authenticate(jwtToken);
+    await db.authenticate(jwtToken);
+  } catch (e) {
+    // connect() succeeds before use()/authenticate() can fail — without this,
+    // the underlying socket leaks (never reaches a caller's try/finally).
+    try { await db.close(); } catch {}
+    throw e;
+  }
 
   return db;
 }
