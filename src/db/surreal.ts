@@ -20,6 +20,21 @@ const AUTH_ERROR_FRAGMENTS = [
   'Authentication failed',
 ];
 
+/**
+ * SurrealDB's own words: "Failed to commit transaction due to a read or write conflict.
+ * This transaction can be retried". Matched on the stable phrases rather than the whole
+ * sentence so wording drift does not silently disable the retry — a guard that stops
+ * matching is indistinguishable from no guard, which is how this cost 5,797 lessons.
+ */
+export function isRetryableConflictError(err: unknown): boolean {
+  const m = (err as Error)?.message ?? String(err ?? "");
+  return /read or write conflict/i.test(m) || /transaction can be retried/i.test(m);
+}
+
+/** Bounded: a conflict clears only if the competing txn commits, so back off, don't spin. */
+const CONFLICT_RETRY_ATTEMPTS = 3;
+const CONFLICT_RETRY_BASE_MS = 40;
+
 function isAuthExpiryError(err: unknown): boolean {
   const msg = (err as Error | undefined)?.message ?? '';
   return AUTH_ERROR_FRAGMENTS.some((f) => msg.includes(f));
@@ -179,6 +194,45 @@ class SurrealDBClient {
           throw new Error(
             `Query failed in ${config.surrealdb.namespace}.${config.surrealdb.database}: ${rerr.message}`
           );
+        }
+      }
+
+      // RETRY A CONFLICT THE DATABASE ITSELF CALLS RETRYABLE.
+      //
+      // SurrealDB returns "Failed to commit transaction due to a read or write conflict.
+      // This transaction can be retried" under concurrent writes. Nothing acted on that
+      // instruction, so the conflict surfaced to callers as a hard 400 and the write was
+      // simply lost.
+      //
+      // Measured on the live fleet 2026-08-31: six identical concept_create_write POSTs
+      // alternated 200/400/200/400/200/400 — a deterministic every-other-write failure, not
+      // an occasional blip. Half of all concept writes were being discarded. The visible
+      // cost was the compose-lesson corpus: 5,797 classified compose failures since
+      // 2026-07-03 produced ONE stored lesson, so the drafter kept re-making mistakes the
+      // substrate had already diagnosed and written guidance for.
+      //
+      // Bounded and backed off, because a conflict resolves only if the competing
+      // transaction gets a chance to commit; retrying instantly just re-collides. Reads are
+      // safe to retry (idempotent) and so are the CREATE/UPSERT writes here, which carry
+      // their own ids — a retry after a genuinely-failed commit cannot double-insert.
+      if (isRetryableConflictError(error)) {
+        for (let attempt = 1; attempt <= CONFLICT_RETRY_ATTEMPTS; attempt++) {
+          await new Promise((r) => setTimeout(r, CONFLICT_RETRY_BASE_MS * attempt));
+          try {
+            const out = await run();
+            logger.info('SurrealDB transaction conflict resolved on retry', { attempt });
+            return out;
+          } catch (retryError) {
+            if (!isRetryableConflictError(retryError) || attempt === CONFLICT_RETRY_ATTEMPTS) {
+              const rerr = retryError as Error;
+              logger.error('SurrealDB query failed after conflict retries', {
+                sql, attempts: attempt, error: rerr.message,
+              });
+              throw new Error(
+                `Query failed in ${config.surrealdb.namespace}.${config.surrealdb.database}: ${rerr.message}`
+              );
+            }
+          }
         }
       }
 
