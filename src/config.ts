@@ -201,7 +201,10 @@ export function loadConfig(): Config {
         'conceptUsage_write',
         'conceptCreditDecontaminate_write',
         'conceptSequence_write',
-      'conceptSearch',
+        'conceptSearch',
+        'concept_delete_write',
+        'concept_retire_write',
+        'concept_supersede_write',
         // conceptUpkeepAuditLog is emitted by write resolvers as a side-effect
         // impulse; it is not resolvable via pointer dispatch (no case in
         // routes/impulses.ts). Removed from advertised shapes to satisfy
