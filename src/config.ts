@@ -202,8 +202,11 @@ export function loadConfig(): Config {
         'conceptCreditDecontaminate_write',
         'conceptSequence_write',
         'conceptSearch',
+        // @shape-dispatch:private
         'concept_delete_write',
+        // @shape-dispatch:private
         'concept_retire_write',
+        // @shape-dispatch:private
         'concept_supersede_write',
         // conceptUpkeepAuditLog is emitted by write resolvers as a side-effect
         // impulse; it is not resolvable via pointer dispatch (no case in
