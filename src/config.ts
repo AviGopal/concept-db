@@ -190,6 +190,9 @@ export function loadConfig(): Config {
         'conceptSequence',
         'impulseSignatureConcept',
         'impulseCooccurrenceEdges',
+        'concept_write',
+        'concept_create_write',
+        'conceptCreditDecontaminate_write',
         // Write shapes (per docs/specs/impulse-write-resolver.md). All dispatch
         // through `POST /v2/impulses/resolve` and emit a `conceptUpkeepAuditLog`
         // impulse to concept-db's `impulse` table.
