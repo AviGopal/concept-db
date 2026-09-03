@@ -382,7 +382,7 @@ export async function searchConcepts(
 
   // Fetch more than `limit` so RRF has enough candidates from both lists.
   const fetchLimit = Math.max(limit * 3, 60);
-  const ftsParams = { ...params, limit: fetchLimit, offset: 0 };
+  const ftsParams = { ...params, limit: fetchLimit, offset: 0, fetch_limit: Math.max(fetchLimit * 4, 50) };
 
   // SurrealDB 3.x: search::score(N) does not work when the search term is a
   // bound parameter ($query). With bound params, the planner reports "no MATCHES
@@ -401,19 +401,44 @@ export async function searchConcepts(
     .trim()
     .slice(0, 200);           // cap length
 
+  // TWO-STAGE FTS — a scalar conjunct beside the match operator defeats the full-text
+  // index, exactly as one beside `<|K,EF|>` defeats HNSW (fixed for the dense leg
+  // 2026-08-30; this is the sibling call site that was never fixed).
+  //
+  // Measured 2026-09-03 against the live store (66,319 rows):
+  //
+  //   one-stage, this query as it was:                                   7.068 s
+  //   `content @@ 'resolver' AND org_id = …`  matched 66,275 of 66,319 rows — the whole
+  //   table — which SELECT * then materialised and sorted. WITHOUT the conjunct the same
+  //   match is 1,391 rows in 45.9 ms, and a filter cannot INCREASE matches: the index was
+  //   not being used.
+  //
+  //   two-stage (this):                                                  0.825 s   ~8.6x
+  //
+  // Stage 1 matches on the FTS index ALONE and takes the top ids. Stage 2 re-applies the
+  // match — over ~20 candidates, so index use is irrelevant there — which is what keeps
+  // `fts_score` available; it is load-bearing downstream, where content and summary hits
+  // are merged with summary weighted 2x, and dropping it would collapse every score to 0.
+  //
+  // `@0@` rather than `@@`: `search::score(0)` refers to match reference 0, and the bare
+  // operator registers no reference. Single statement on purpose — SurrealDBClient.query
+  // returns result[0], so a `LET …; SELECT …` pair would silently return the LET.
+  //
+  // THE FILTER STAYS IN SQL. It is tenant isolation and the root-credential path has no
+  // PERMISSIONS backstop; moving it into application code would be a cross-tenant leak.
   const contentSql = `
-    SELECT *, search::score(0) AS fts_score
-    FROM concept
-    WHERE content @@ '__FTS_TERM__' AND org_id = $org_id${scalarWhere}
+    SELECT *, search::score(0) AS fts_score OMIT content_embedding, summary_embedding
+    FROM (SELECT id, search::score(0) AS s FROM concept WHERE content @0@ '__FTS_TERM__' ORDER BY s DESC LIMIT $fetch_limit).map(|$r| type::thing("concept", $r.id))
+    WHERE content @0@ '__FTS_TERM__' AND org_id = $org_id${scalarWhere}
     ORDER BY fts_score DESC
     LIMIT $limit
     START $offset
   `;
 
   const summarySql = `
-    SELECT *, search::score(0) AS fts_score
-    FROM concept
-    WHERE summary @@ '__FTS_TERM__' AND org_id = $org_id${scalarWhere}
+    SELECT *, search::score(0) AS fts_score OMIT content_embedding, summary_embedding
+    FROM (SELECT id, search::score(0) AS s FROM concept WHERE summary @0@ '__FTS_TERM__' ORDER BY s DESC LIMIT $fetch_limit).map(|$r| type::thing("concept", $r.id))
+    WHERE summary @0@ '__FTS_TERM__' AND org_id = $org_id${scalarWhere}
     ORDER BY fts_score DESC
     LIMIT $limit
     START $offset
