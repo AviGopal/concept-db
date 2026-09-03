@@ -730,7 +730,29 @@ async function searchConceptsByDense(
     const knnSql = (field: string) =>
       `SELECT id, vector::distance::knn() AS _dense_dist FROM concept WHERE ${field} <|${knnK},${ef}|> $query_vec`;
     // Stage 2 — hydrate and filter the candidate set (small, so this is index-irrelevant).
-    const hydrateSql = `SELECT * OMIT content_embedding, summary_embedding FROM concept WHERE id IN $ids${filterStr}`;
+    // HYDRATE BY RECORD ID, NOT BY THE `id` STRING FIELD.
+    //
+    // `id` is DEFINED AS A STRING FIELD on concept, duplicating the record id, and NOTHING
+    // INDEXES IT — so `WHERE id IN $ids` full-scans every row. Measured 2026-09-03 against
+    // the live store (66,319 rows):
+    //
+    //   SELECT id FROM concept WHERE id IN $ids   (40 ids, no filter, no SELECT *)  4.92 s
+    //   SELECT id FROM type::thing("concept", …)  (record-id lookup)                0.28 ms
+    //
+    // ~17,000x. THIS is what made the dense leg miss its 2000ms budget even though the KNN
+    // itself measures 97-128ms — so search degraded to lexical, returned ZERO, and the
+    // drafter planned with no architectural principles. Whole-shape check: this hydrate
+    // against the same 40 candidates, org filter included, measures 14.7ms.
+    //
+    // Single statement on purpose: SurrealDBClient.query returns `result[0]`, so a
+    // `LET $things = …; SELECT …` pair would return the LET and silently yield nothing.
+    // The `.map(|$i| type::thing(…))` form was verified directly against the live store.
+    //
+    // THE FILTER STAYS IN SQL. It is tenant isolation and the root-credential path has no
+    // PERMISSIONS backstop; moving it into TypeScript would be a cross-tenant leak, not an
+    // optimisation. `WHERE true` is a no-op anchor so `filterStr` (which always begins with
+    // " AND ") composes unchanged.
+    const hydrateSql = `SELECT * OMIT content_embedding, summary_embedding FROM $ids.map(|$i| type::thing("concept", $i)) WHERE true${filterStr}`;
 
     const runQuery = <T>(sql: string, params: Record<string, unknown>): Promise<T[]> =>
       jwtToken ? queryWithAuth<T>(jwtToken, sql, params) : surrealDB.query<T>(sql, params);
