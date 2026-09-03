@@ -17,6 +17,64 @@ const MODEL_DIR = process.env.EMBEDDING_MODEL_DIR ?? '/app/models/all-MiniLM-L6-
 const DIM = 384;
 const MAX_SEQ_LEN = 128;
 
+/**
+ * QUERY-EMBEDDING CACHE.
+ *
+ * MEASURED 2026-09-03 against the live vessel at host load ~5.5, with controls that
+ * isolate the cost to a single call:
+ *
+ *     GET /concepts/<id>                   0.035s
+ *     GET /concepts/search?source_type=…   0.154s   <- filter-only: no query embedding
+ *     GET /concepts/search?query=…         8–11.6s  <- the whole cost is the embedding
+ *
+ * The store, the HNSW index and routing are all fast. `embed()` runs a local ONNX
+ * inference padded to MAX_SEQ_LEN on every call, and an IDENTICAL query recomputes from
+ * scratch every time: three consecutive runs of the same string measured 8.5s, 11.6s, 8.4s.
+ *
+ * Why this is not merely a latency nicety. feature-compose consults these principles
+ * before planning ("CONSULTATION-ON-AUTHOR") on an 8s budget. At ~10s that consult times
+ * out and the drafter plans with NO architectural principles — development-vessel logged
+ * 18 principle-consult failures in one afternoon while this vessel's /health answered in
+ * 6.7ms. That is the mechanism behind the substrate authoring `exports.substrateGap.emit`
+ * and then `POST /v2/impulses/substrateGap`: the contract WAS in the store, and the reader
+ * could not afford to read it.
+ *
+ * The consult reduces a spec to a few salient terms, so queries repeat heavily across
+ * composes — the workload a cache is for. Bounded LRU: a cache that can grow without limit
+ * would trade a latency defect for a memory one.
+ */
+const EMBED_CACHE_CAPACITY = Number(process.env.EMBEDDING_CACHE_CAPACITY ?? 512);
+
+/** Cache key. Deliberately NOT normalised — the embedder is sensitive to spacing, so two
+ *  strings that differ at all must not share a vector. */
+export function embeddingCacheKey(text: string): string {
+  return text;
+}
+
+/** Bounded LRU over query vectors. Capacity <= 0 disables caching (never throws). */
+export class EmbeddingCache {
+  private readonly map = new Map<string, Float32Array>();
+  constructor(private readonly capacity: number) {}
+  get size(): number { return this.map.size; }
+  get(key: string): Float32Array | undefined {
+    const v = this.map.get(key);
+    if (v === undefined) return undefined;
+    this.map.delete(key); // re-insert to refresh recency
+    this.map.set(key, v);
+    return v;
+  }
+  set(key: string, vec: Float32Array): void {
+    if (this.capacity <= 0) return;
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, vec);
+    while (this.map.size > this.capacity) {
+      const oldest = this.map.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.map.delete(oldest);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Minimal WordPiece tokeniser
 // ---------------------------------------------------------------------------
@@ -160,10 +218,19 @@ class LocalEmbeddingServiceImpl {
     }
   }
 
+  private readonly embedCache = new EmbeddingCache(EMBED_CACHE_CAPACITY);
+
   async embed(text: string): Promise<Float32Array> {
     if (!this.ready || !this.session) {
       throw new Error('LocalEmbeddingService not ready');
     }
+
+    // See the EMBEDDING CACHE note above: an identical query recomputed a full ONNX
+    // inference every time (measured 8.5s / 11.6s / 8.4s for three runs of one string),
+    // which is the whole reason the drafter's 8s principle consult was timing out.
+    const cacheKey = embeddingCacheKey(text);
+    const cached = this.embedCache.get(cacheKey);
+    if (cached !== undefined) return cached;
 
     const ort = await import('onnxruntime-node');
     const { input_ids, attention_mask, token_type_ids } = this.tokenizer.encode(text);
@@ -203,6 +270,9 @@ class LocalEmbeddingServiceImpl {
       for (let d = 0; d < DIM; d++) vec[d] /= norm;
     }
 
+    // Cache the FINISHED vector (mean-pooled and L2-normalised), so a hit is byte-for-byte
+    // what a miss would have produced.
+    this.embedCache.set(cacheKey, vec);
     return vec;
   }
 
