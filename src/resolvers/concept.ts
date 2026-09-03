@@ -5,6 +5,7 @@
  * Resolution creates a snapshot capturing the state at resolution time.
  */
 
+import { denseLegStats } from '../services/search-telemetry.js';
 import { nanoid } from 'nanoid';
 import { surrealDB, queryWithAuth } from '../db/surreal';
 import { logger } from '../utils/logger';
@@ -519,15 +520,27 @@ export async function searchConcepts(
     });
   } else {
     densePromise = searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken);
+    // TIMED-OUT vs GENUINELY-EMPTY. Both outcomes land in `denseResults.length === 0`, so
+    // the log below could not tell starvation from "no matches" — and a counter over that
+    // branch alone would report starvation on a query that simply had none. This flag is
+    // the discriminator. `Promise.race` does not cancel the loser, so the settle is real.
+    let _denseSettled = false;
+    void densePromise.then(() => { _denseSettled = true; }, () => { _denseSettled = true; });
     denseResults = await Promise.race([
       densePromise,
       new Promise<Concept[]>(resolve => setTimeout(() => resolve([]), DENSE_BUDGET_MS)),
     ]).catch(() => [] as Concept[]);
     if (denseResults.length === 0) {
+      const _timedOut = !_denseSettled;
+      denseLegStats.recordEmpty({ timedOut: _timedOut });
       logger.info('[searchConcepts] dense leg returned nothing within its budget — serving lexical results only', {
         budget_ms: DENSE_BUDGET_MS,
         lexical_hits: lexicalHits,
+        // Named so the counter and the sentence can never disagree about what happened.
+        timed_out: _timedOut,
       });
+    } else {
+      denseLegStats.recordHit();
     }
   }
 

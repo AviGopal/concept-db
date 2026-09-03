@@ -2,6 +2,7 @@
  * concept-db: Concept Management Vessel — resolver for the concept graph and prose knowledge
  */
 
+import { denseLegStats, eventLoopLag } from './services/search-telemetry.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger as honoLogger } from 'hono/logger';
@@ -62,6 +63,20 @@ app.get('/health', async (c) => {
         enabled: process.env.DENSE_BACKFILL_ENABLED === 'true',
       },
       embedding: embeddingService.getStatus(),
+      // WHY THESE ARE ON /health. This endpoint answered in 6.7ms all day on 2026-09-02/03
+      // while semantic search returned ZERO for every caller — a liveness ping reporting
+      // green through a total outage of the capability. feature-compose consequently planned
+      // with no architectural principles, which is the mechanism behind two inert
+      // substrate-authored commits. These two fields make that outage visible without
+      // making the probe itself run a search (which would risk a restart loop under the very
+      // starvation it measures).
+      //
+      // dense_budget_miss_rate > 0 means semantic search is degrading to lexical.
+      // event_loop_lag.max_ms large while every component is individually fast is the
+      // signature of ONNX inference blocking the loop — the hypothesis that was
+      // unfalsifiable because nothing measured it.
+      search: denseLegStats.snapshot(),
+      event_loop_lag: eventLoopLag.snapshot(),
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -264,6 +279,12 @@ async function startup() {
       port: config.port,
       host: config.host,
     });
+
+    // Start sampling event-loop lag. This is the direct test of the starvation hypothesis:
+    // if ONNX inference is blocking the loop, lag spikes here while every individual
+    // operation still measures fast — the exact signature observed 2026-09-02/03. Unref'd,
+    // so telemetry can never hold the process open.
+    eventLoopLag.start(1000);
 
     // Non-blocking: init local embedding model then optionally backfill
     embeddingService.init().then(async () => {
