@@ -204,6 +204,9 @@ export function loadConfig(): Config {
         'conceptUsage_write',
         'conceptCreditDecontaminate_write',
         'conceptSequence_write',
+        'concept_delete_write',
+        'concept_retire_write',
+        'concept_supersede_write',
         'conceptSearch',
         // @shape-dispatch:private
         'concept_delete_write',
