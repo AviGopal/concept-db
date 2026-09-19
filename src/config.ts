@@ -145,6 +145,16 @@ export function loadConfig(): Config {
 
     redis: {
       url: process.env.REDIS_URL || 'redis://localhost:6379',
+    },
+
+    api: {
+      port: process.env.PORT || '8300',
+    },
+
+    delete: {
+      enabled: true,
+      retentionDays: 30,
+    },
       ttl: {
         concept: parseEnvInt('REDIS_CONCEPT_TTL', 3600),       // 1 hour
         resolution: parseEnvInt('REDIS_RESOLUTION_TTL', 1800), // 30 minutes
