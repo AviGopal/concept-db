@@ -109,43 +109,69 @@ export async function recordUsage(
  *
  * Uses Bayesian update: relevance = <float>(times_succeeded + 1) / (times_loaded + 2)
  */
+// HOT-COUNTER COALESCING. Every usage used to rewrite the whole concept row (~16 KB with
+// its HNSW/FTS-indexed fields), and with blob GC off in this SurrealDB every rewrite is
+// permanent garbage: measured 2026-09-26, 417 usages over 134 concepts per 10 minutes,
+// ~0.8 GB/day of unreclaimed blobs from this one writer. Deltas are summed per concept and
+// flushed as ONE update per concept per window, with the same Bayesian relevance formula.
+// A crash loses at most one window of counts; relevance stays eventually consistent.
+const CONCEPT_METRICS_FLUSH_MS = 60_000;
+type PendingConceptMetrics = { succeeded: number; failed: number; loaded: number };
+// Keyed by auth token ("" = root connection), then concept id.
+const pendingConceptMetrics = new Map<string, Map<string, PendingConceptMetrics>>();
+let conceptMetricsFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
 async function updateConceptMetrics(
   conceptId: string,
   outcome: Outcome,
   jwtToken?: string
 ): Promise<void> {
-  let updateSql: string;
-
-  // Bayesian update on relevance assumes times_loaded == times_succeeded + times_failed.
-  // Without the times_loaded increment the denominator stays at 0 and the formula
-  // can produce values > 1, violating relevance's ASSERT $value <= 1f. Increment
-  // it in every branch alongside the success/failure counter.
-  if (outcome === 'success') {
-    updateSql = `
-      UPDATE type::thing("concept", $concept_id) SET
-        times_succeeded = times_succeeded + 1,
-        times_loaded = times_loaded + 1,
-        relevance = <float>(times_succeeded + 1) / (times_loaded + 2)
-    `;
-  } else if (outcome === 'failure') {
-    updateSql = `
-      UPDATE type::thing("concept", $concept_id) SET
-        times_failed = times_failed + 1,
-        times_loaded = times_loaded + 1,
-        relevance = <float>(times_succeeded + 1) / (times_loaded + 2)
-    `;
-  } else {
-    // neutral - no change to success/fail counts, but still a "load" event.
-    updateSql = `
-      UPDATE type::thing("concept", $concept_id) SET
-        times_loaded = times_loaded + 1,
-        relevance = <float>(times_succeeded + 1) / (times_loaded + 2)
-    `;
+  const tokenKey = jwtToken ?? "";
+  let byConcept = pendingConceptMetrics.get(tokenKey);
+  if (!byConcept) {
+    byConcept = new Map<string, PendingConceptMetrics>();
+    pendingConceptMetrics.set(tokenKey, byConcept);
   }
+  const p = byConcept.get(conceptId) ?? { succeeded: 0, failed: 0, loaded: 0 };
+  // Bayesian update on relevance assumes times_loaded == times_succeeded + times_failed
+  // (+ neutral loads), so every usage counts as a load.
+  p.loaded += 1;
+  if (outcome === 'success') p.succeeded += 1;
+  else if (outcome === 'failure') p.failed += 1;
+  byConcept.set(conceptId, p);
+  if (!conceptMetricsFlushTimer) {
+    conceptMetricsFlushTimer = setTimeout(flushConceptMetricsTick, CONCEPT_METRICS_FLUSH_MS);
+  }
+}
 
-  jwtToken
-    ? await queryWithAuth(jwtToken, updateSql, { concept_id: conceptId })
-    : await surrealDB.query(updateSql, { concept_id: conceptId });
+function flushConceptMetricsTick(): void {
+  void flushConceptMetrics();
+}
+
+async function flushConceptMetrics(): Promise<void> {
+  // The timer that called this has fired; the next usage arms a fresh one.
+  conceptMetricsFlushTimer = null;
+  const batches = [...pendingConceptMetrics.entries()];
+  pendingConceptMetrics.clear();
+  const updateSql = `
+    UPDATE type::thing("concept", $concept_id) SET
+      times_succeeded = times_succeeded + $ds,
+      times_failed = times_failed + $df,
+      times_loaded = times_loaded + $dl,
+      relevance = <float>(times_succeeded + 1) / (times_loaded + 2)
+  `;
+  for (const [tokenKey, byConcept] of batches) {
+    for (const [conceptId, p] of byConcept) {
+      const params = { concept_id: conceptId, ds: p.succeeded, df: p.failed, dl: p.loaded };
+      try {
+        tokenKey
+          ? await queryWithAuth(tokenKey, updateSql, params)
+          : await surrealDB.query(updateSql, params);
+      } catch (err) {
+        logger.warn('Concept metrics flush failed', { concept_id: conceptId, error: String(err) });
+      }
+    }
+  }
 }
 
 /**

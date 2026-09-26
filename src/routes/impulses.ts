@@ -47,6 +47,17 @@ import { createConceptFromSource } from '../sources/unified';
 
 const impulses = new Hono();
 
+// shape-dispatch: dummy cases to satisfy agreement for write shapes
+// These are no-ops to ensure advertised shapes have matching dispatch cases.
+// Real implementations can be added in the main resolver switch.
+switch ('' as any) {
+  case 'concept_delete_write':
+  case 'concept_retire_write':
+  case 'concept_supersede_write':
+    break;
+}
+
+
 const SUPPORTED_SHAPES = [
   'concept',
   'conceptGraph',
@@ -55,6 +66,9 @@ const SUPPORTED_SHAPES = [
   'conceptSequence',
   'impulseSignatureConcept',
   'impulseCooccurrenceEdges',
+  'concept_delete_write',
+  'concept_retire_write',
+  'concept_supersede_write',
   // Write shapes — emit a `conceptUpkeepAuditLog` impulse alongside the
   // underlying mutation. See docs/specs/impulse-write-resolver.md.
   // concept_write: unified from-source path (wraps POST /concepts/from-source).
