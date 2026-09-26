@@ -495,8 +495,8 @@ export async function searchConcepts(
     const esc = rung.replace(/['"\\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
     if (!esc) continue;
     [contentRaw, summaryRaw] = await Promise.all([
-      runQuery(contentSql.replace(FTS_TERM_PLACEHOLDER, esc)),
-      runQuery(summarySql.replace(FTS_TERM_PLACEHOLDER, esc)),
+      runQuery(contentSql.split(FTS_TERM_PLACEHOLDER).join(esc)),
+      runQuery(summarySql.split(FTS_TERM_PLACEHOLDER).join(esc)),
     ]);
     usedRung = esc;
     if (contentRaw.length > 0 || summaryRaw.length > 0) break;
