@@ -166,6 +166,30 @@ function installSpy(store: FakeStore) {
         return match ? [{ id: match.id, weight: match.weight } as never] : [];
       }
 
+      // ---- concept usage create (for conceptUsage_write) ----
+      if (/^\s*INSERT\s+INTO\s+concept_usage\b/i.test(sql)) {
+        const newUsage = {
+          ...params,
+          id: `concept_usage:test_${Math.random()}`,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        store.usages.push(newUsage as never);
+        return [newUsage as never];
+      }
+
+      // ---- impulse create (for audit logs from write shapes) ----
+      if (/^\s*INSERT\s+INTO\s+impulse\b/i.test(sql)) {
+        const newImpulse = {
+          ...params,
+          id: `impulse:test_${Math.random()}`,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        store.impulses.push(newImpulse as never);
+        return [newImpulse as never];
+      }
+
       // ---- edgeExists (count query for sequence) ----
       if (/^\s*SELECT\s+count\(\)\s+as\s+cnt\s+FROM\s+concept_edge/i.test(sql)) {
         const from = params.from_id as string;
