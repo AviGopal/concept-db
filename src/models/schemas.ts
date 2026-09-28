@@ -78,7 +78,7 @@ export type ScopeType = z.infer<typeof ScopeTypeSchema>;
 // =============================================================================
 
 export const PointerSchema = z.object({
-  type: z.string().min(1),
+  type: z.string(),
   path: z.string().optional(),
   url: z.string().optional(),
   query: z.string().optional(),
@@ -123,8 +123,8 @@ export const ConceptSchema = z.object({
   resolution_snapshot: ResolutionSnapshotSchema.optional().nullable(),
   scope: ScopeTypeSchema.default('org'),
   public: z.boolean().default(false),
-  org_id: z.string().min(1),
-  project_id: z.string().min(1).optional().nullable(),
+  org_id: z.string(),
+  project_id: z.string().optional().nullable(),
   created_at: z.string().datetime().optional(),
   updated_at: z.string().datetime().optional(),
 });
@@ -217,7 +217,7 @@ export const SearchConceptsRequestSchema = z.object({
   shape: z.string().optional(),
   // F26: accept either a single source_type or an array. The route handler
   // parses comma-separated query strings into an array; the resolver uses an
-  // IN-clause when given an array (>1 element) and single-value equality otherwise. Empty arrays are invalid.
+  // IN-clause when given an array (>1 element) and single-value equality otherwise.
   // This lets prime_substrate_concepts query bridge-minted impulse_signature
   // concepts AND hand-minted memo/pattern concepts in a single call.
   source_type: z.union([SourceTypeSchema, z.array(SourceTypeSchema)]).optional(),
