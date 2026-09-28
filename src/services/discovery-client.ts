@@ -144,7 +144,7 @@ export class DiscoveryClient {
         resolve_request_format: 'pointer',
         auth_scheme: 'ApiKey',
         // Timeout is 30s: resolveConcept performs up to ~5 sequential SurrealDB round-trips (fetch root, outgoing edges, incoming edges, update, neighbor fetch) plus optional graph walks on larger shapes; 5s is occasionally tight under cold-cache load. conceptSearch shape performs an embedding-model call for free-text queries, which routinely exceeds 10s on cold cache — hence 30s.
-        resolve_timeout_ms: 10000,
+        resolve_timeout_ms: 30000,
         // Auth token source (Wave A3, 2026-04-23). Concept-db's
         // PERMISSIONS clauses tenant by `$auth.org_id` from the caller's
         // service identity, so caller_identity is the correct credential.

@@ -99,7 +99,8 @@ describe('DiscoveryClient.register advertises resolver contract', () => {
     expect(body.resolve_endpoint).toBe('/v2/impulses/resolve');
     expect(body.resolve_request_format).toBe('pointer');
     expect(body.auth_scheme).toBe('ApiKey');
-    expect(body.resolve_timeout_ms).toBe(10000);
+    // 30 s is the documented budget (see DiscoveryClient.register): multi-round-trip resolves and cold-cache embeddings.
+    expect(body.resolve_timeout_ms).toBe(30000);
   });
 
   test('POST /register body still carries identity fields (regression)', async () => {
