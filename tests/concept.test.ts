@@ -63,7 +63,7 @@ describe('Schema Validation', () => {
 
   test('should reject invalid CreateConceptRequest', () => {
     const invalid = {
-      source_type: 'invalid_type',
+      source_type: '',
       content: 'Test',
     };
     expect(() => CreateConceptRequestSchema.parse(invalid)).toThrow();
