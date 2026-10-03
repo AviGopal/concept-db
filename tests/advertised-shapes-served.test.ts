@@ -13,8 +13,10 @@
  * supported_shapes list (read from its 400 body), resolving it with an empty pointer does NOT
  * answer "Unknown impulse shape". A validation 400 for a missing pointer field, a 401, or a
  * 500 from the fixture's refusing DB all pass: they prove the dispatch reached a case.
- * Either honest fix turns this green: implement the shape, or stop advertising it (remove it
- * from BOTH lists; a shape left in SUPPORTED_SHAPES still lies to callers in the 400 body).
+ * qa ruling: un-advertise all three, removing each from BOTH lists (a shape left in
+ * SUPPORTED_SHAPES still misleads callers in the 400 body). Implementing delete now would add a
+ * federatable write while no federation shape policy exists. A later real implementation also
+ * passes these tests.
  *
  * Positive control: a bogus shape DOES answer "Unknown impulse shape" through the same route,
  * so a pass is never the detector failing to see the error.
@@ -103,7 +105,7 @@ describe('concept-db: every advertised shape is served', () => {
     expect(String(r.body?.error)).toMatch(/concept_id/);
   });
 
-  for (const shape of ['concept_retire_write', 'concept_supersede_write']) {
+  for (const shape of ['concept_retire_write', 'concept_supersede_write', 'concept_delete_write']) {
     test(`${shape} is served OR not advertised`, async () => {
       if (!isAdvertised(shape)) return; // honestly un-advertised from both lists
       const r = await resolveEmpty(shape);
@@ -111,16 +113,12 @@ describe('concept-db: every advertised shape is served', () => {
     });
   }
 
-  test('concept_delete_write is served', async () => {
-    const r = await resolveEmpty('concept_delete_write');
-    expect(`${r.status} ${String(r.body?.error ?? '')}`).not.toMatch(UNKNOWN_RE);
-  });
-
-  test('MUST-FAIL: the advertised list still contains concept_delete_write and concept_create_write', () => {
-    // guards against "fixing" by un-advertising everything
-    for (const shape of ['concept_delete_write', 'concept_create_write']) {
+  test('MUST-FAIL: the advertised list still contains concept_create_write, concept and conceptSearch', () => {
+    // the served core: guards against "fixing" by un-advertising everything. Checked against
+    // config.discovery.shapes, the list registered with discovery (SUPPORTED_SHAPES has never
+    // listed conceptSearch, although the switch serves it).
+    for (const shape of ['concept_create_write', 'concept', 'conceptSearch']) {
       expect(config.discovery.shapes).toContain(shape);
-      expect(reportedSupported).toContain(shape);
     }
   });
 
