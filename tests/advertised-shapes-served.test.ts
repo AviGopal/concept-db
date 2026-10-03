@@ -124,8 +124,11 @@ describe('concept-db: every advertised shape is served', () => {
     }
   });
 
-  // Class detector over every advertised shape (not in the gap's only_tests; names follow the list).
-  for (const shape of advertised) {
+  // Class detector over every OTHER advertised shape (not in the gap's only_tests; names follow the
+  // list). The three hollow write shapes are covered by the named tests above and skipped here, so
+  // this loop adds no failing names of its own while they are open.
+  const NAMED = new Set(['concept_retire_write', 'concept_supersede_write', 'concept_delete_write']);
+  for (const shape of advertised.filter((s) => !NAMED.has(s))) {
     test(`advertised shape "${shape}" is served (not "Unknown impulse shape")`, async () => {
       const r = await resolveEmpty(shape);
       expect(`${r.status} ${String(r.body?.error ?? '')}`).not.toMatch(UNKNOWN_RE);
