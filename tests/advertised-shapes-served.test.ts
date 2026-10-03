@@ -77,7 +77,11 @@ installFixtureOnlySeams();
 const bogus = await resolveEmpty(BOGUS);
 restoreSeams();
 const reportedSupported: string[] = Array.isArray(bogus.body?.supported_shapes) ? bogus.body.supported_shapes : [];
+// "Advertised" = in EITHER source discovery registration and callers see: config.discovery.shapes
+// (registered with discovery) or SUPPORTED_SHAPES (read back through the 400 body, which is that
+// constant). Un-advertising a shape means removing it from both.
 const advertised = [...new Set<string>([...config.discovery.shapes, ...reportedSupported])].sort();
+const isAdvertised = (shape: string) => advertised.includes(shape);
 
 describe('concept-db: every advertised shape is served', () => {
   beforeAll(installFixtureOnlySeams);
@@ -99,6 +103,28 @@ describe('concept-db: every advertised shape is served', () => {
     expect(String(r.body?.error)).toMatch(/concept_id/);
   });
 
+  for (const shape of ['concept_retire_write', 'concept_supersede_write']) {
+    test(`${shape} is served OR not advertised`, async () => {
+      if (!isAdvertised(shape)) return; // honestly un-advertised from both lists
+      const r = await resolveEmpty(shape);
+      expect(`${r.status} ${String(r.body?.error ?? '')}`).not.toMatch(UNKNOWN_RE);
+    });
+  }
+
+  test('concept_delete_write is served', async () => {
+    const r = await resolveEmpty('concept_delete_write');
+    expect(`${r.status} ${String(r.body?.error ?? '')}`).not.toMatch(UNKNOWN_RE);
+  });
+
+  test('MUST-FAIL: the advertised list still contains concept_delete_write and concept_create_write', () => {
+    // guards against "fixing" by un-advertising everything
+    for (const shape of ['concept_delete_write', 'concept_create_write']) {
+      expect(config.discovery.shapes).toContain(shape);
+      expect(reportedSupported).toContain(shape);
+    }
+  });
+
+  // Class detector over every advertised shape (not in the gap's only_tests; names follow the list).
   for (const shape of advertised) {
     test(`advertised shape "${shape}" is served (not "Unknown impulse shape")`, async () => {
       const r = await resolveEmpty(shape);
