@@ -297,6 +297,14 @@ export async function resolveConcept(
 }
 
 /**
+ * Relevance floors the scalar search path tries, highest first, before the caller's own
+ * min_relevance (see the comment in searchConcepts). They bound how many rows the
+ * filter-inside subquery materialises. They cannot change the rows returned: a rung is
+ * accepted only when it fills the page, which makes it exactly the head of the full order.
+ */
+const SCALAR_RELEVANCE_FLOOR_RUNGS = [0.9, 0.75, 0.6] as const;
+
+/**
  * Search for concepts
  *
  * When `request.query` is non-empty:
@@ -354,19 +362,58 @@ export async function searchConcepts(
   }
 
   if (!request.query) {
-    // Scalar-only path (no query term) — unchanged behaviour
-    const allConditions = ['org_id = $org_id', ...scalarConditions];
-    const whereClause = `WHERE ${allConditions.join(' AND ')}`;
-    const sql = `
-      SELECT * FROM concept
-      ${whereClause}
-      ORDER BY relevance DESC, created_at DESC
-      LIMIT $limit
-      START $offset
-    `;
-    const results = jwtToken
-      ? await queryWithAuth<Concept>(jwtToken, sql, params)
-      : await surrealDB.query<Concept>(sql, params);
+    // Scalar-only path (no query term).
+    //
+    // FILTER INSIDE, ORDER/LIMIT OUTSIDE. The direct form
+    //   SELECT * FROM concept WHERE org_id = $org_id AND relevance >= $x
+    //   ORDER BY relevance DESC, created_at DESC LIMIT $limit START $offset
+    // returns the LEAST relevant rows on SurrealDB 2.3.10 (also 2.4.1, 2.5.0): the planner
+    // iterates idx_concept_relevance ascending and its MemoryOrderedLimit collector stops at
+    // `limit` rows, as if the index order were the requested order. Measured live on node 1
+    // 2026-10-03: 60,068 rows qualified at 0.5, the search returned relevance 0.5, the truth
+    // (WITH NOINDEX) top is 0.9958. Concept recall feeds drafter prompts, so this fed them
+    // the least relevant concepts. With the filter in a subquery the outer ORDER BY sorts the
+    // whole filtered set, whatever index the inner WHERE uses.
+    //
+    // BOUNDED BY A DESCENDING RELEVANCE FLOOR. The subquery is correct but materialises every
+    // qualifying row: 7.1 s for 60k rows (hermetic 2.3.10, rocksdb, 76k-row fixture), where the
+    // wrong direct form took 46 ms. So try `relevance >= floor` for floors above the caller's
+    // minimum first and accept a rung only when it fills the page. That is exact, not
+    // approximate: every excluded row has relevance below the floor and every included row is
+    // at or above it, so the top offset+limit of the subset is the top offset+limit of the
+    // whole set, and created_at ties fall wholly inside or wholly outside a rung. Same fixture:
+    // floor 0.9 (4,025 rows) 459 ms, floor 0.95 (2,010 rows) 270 ms. The floors are cost
+    // tuning only; no floor value can change WHICH rows are returned.
+    //
+    // An (org_id, relevance) compound index was measured and rejected: the planner does pick
+    // it (eq prefix + range tail, which 2.3.10 orders correctly), but every rung got slower
+    // (0.9: 784 ms vs 459 ms) and the index build took 156 s on 76k rows, inside concept-db's
+    // ExecStartPre schema apply.
+    // Gap: concept-min-relevance-search-returns-the-least-relevant-concepts-on-surrealdb-2-3-10.
+    const baseConditions = [
+      'org_id = $org_id',
+      ...scalarConditions.filter((c) => c !== 'relevance >= $min_relevance'),
+    ];
+    const minRelevance = request.min_relevance;
+    const floors: Array<number | undefined> = [
+      ...SCALAR_RELEVANCE_FLOOR_RUNGS.filter((f) => minRelevance === undefined || f > minRelevance),
+      minRelevance, // last rung: the caller's own minimum (undefined = no relevance filter)
+    ];
+    let results: Concept[] = [];
+    for (const floor of floors) {
+      const conditions = floor === undefined ? baseConditions : [...baseConditions, 'relevance >= $relevance_floor'];
+      const sql = `
+        SELECT * FROM (SELECT * FROM concept WHERE ${conditions.join(' AND ')})
+        ORDER BY relevance DESC, created_at DESC
+        LIMIT $limit
+        START $offset
+      `;
+      const rungParams = floor === undefined ? params : { ...params, relevance_floor: floor };
+      results = jwtToken
+        ? await queryWithAuth<Concept>(jwtToken, sql, rungParams)
+        : await surrealDB.query<Concept>(sql, rungParams);
+      if (results.length >= limit) break;
+    }
     return results;
   }
 

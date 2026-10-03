@@ -70,11 +70,20 @@ beforeAll(async () => {
     // 400 concepts (SurrealQL ranges exclude the end: 0..400 is 400 values), relevance spread over (0, 1], half of them >= 0.5; plus another org's top rows.
     await sql(`FOR $i IN 0..400 { CREATE concept CONTENT { id: 'c' + <string>$i, pointer: {}, shape: 'x', source_type: 'goal', relevance: <float>($i + 1) / 400.0, org_id: '${ORG}', scope: 'org' } };`);
     await sql(`FOR $i IN 0..20 { CREATE concept CONTENT { id: 'o' + <string>$i, pointer: {}, shape: 'x', source_type: 'goal', relevance: 1.0, org_id: 'organizations:other', scope: 'org' } };`);
+    // Stale-relevance upkeep candidates (times_loaded > 10, success rate < 0.3), in their own org.
+    await sql(`FOR $i IN 0..30 { CREATE concept CONTENT { id: 'u' + <string>$i, pointer: {}, shape: 'x', source_type: 'goal', relevance: 0.51 + <float>$i / 100.0, times_loaded: 20, times_succeeded: 1, org_id: 'organizations:upkeep', scope: 'org' } };`);
     process.env.SURREALDB_URL = URL_;
     process.env.SURREALDB_NAMESPACE = NS;
     process.env.SURREALDB_DATABASE = DB;
     process.env.SURREALDB_USERNAME = 'root';
     process.env.SURREALDB_PASSWORD = PASS;
+    // In a full-suite run another file has already imported src/config (frozen at import from the
+    // env of that moment) and possibly connected the shared client, so the env above is not
+    // enough: re-point the config object the client reads at connect time and drop any
+    // existing connection. Without this the file passes alone and fails in `bun test`.
+    const { config } = await import('../src/config');
+    Object.assign(config.surrealdb, { url: URL_, namespace: NS, database: DB, username: 'root', password: PASS });
+    await (await import('../src/db/surreal')).surrealDB.close();
     ({ searchConcepts } = await import('../src/resolvers/concept'));
   } catch (e) {
     startError = `cannot spawn surreal: ${e instanceof Error ? e.message : String(e)}`;
@@ -116,6 +125,43 @@ describe('concept search with min_relevance', () => {
   it('without min_relevance the scalar path is already correct and must stay so', async () => {
     const got = (await searchConcepts({ limit: 10 }, ORG)).map((r: any) => String(r.id));
     expect(got).toEqual(await truth(0, 10));
+  }, 60_000);
+
+  // The scalar path tries relevance floors 0.9, 0.75, 0.6 before the caller's minimum and accepts a
+  // floor only when it fills the page. In this fixture 41 rows are >= 0.9, 101 >= 0.75, 161 >= 0.6.
+  it('a page past the high floors falls through to the next floor and is still exact', async () => {
+    const got = (await searchConcepts({ min_relevance: 0.5, limit: 10, offset: 100 }, ORG)).map((r: any) => String(r.id));
+    const all = await truth(0.5, 110);
+    expect(got).toEqual(all.slice(100, 110));
+  }, 60_000);
+
+  it('a limit larger than every floor returns the whole qualifying set in order', async () => {
+    const got = (await searchConcepts({ min_relevance: 0.5, limit: 300 }, ORG)).map((r: any) => String(r.id));
+    const all = await truth(0.5, 300);
+    expect(all.length).toBe(201);
+    expect(got).toEqual(all);
+  }, 60_000);
+
+  it('a minimum above every floor is used directly', async () => {
+    const got = (await searchConcepts({ min_relevance: 0.95, limit: 10 }, ORG)).map((r: any) => String(r.id));
+    expect(got).toEqual(await truth(0.95, 10));
+  }, 60_000);
+
+  it('without min_relevance a deep page falls through to the unfiltered order', async () => {
+    const got = (await searchConcepts({ limit: 10, offset: 395 }, ORG)).map((r: any) => String(r.id));
+    const all = await truth(0, 405);
+    expect(got).toEqual(all.slice(395, 405));
+    expect(got.length).toBe(5);
+  }, 60_000);
+
+  it('the stale-relevance upkeep candidates are the most relevant stale concepts, not the least', async () => {
+    const { getUpkeepActivity } = await import('../src/upkeep/activities');
+    const q = getUpkeepActivity('decay-stale-relevance')!.candidateQuery;
+    const got = ((await sql(q))[0].result as any[]).map((r) => String(r.id));
+    const res = await sql(`SELECT id, relevance FROM concept WITH NOINDEX WHERE times_loaded > 10 AND relevance > 0.5 AND (times_succeeded / times_loaded) < 0.3 ORDER BY relevance DESC LIMIT 10;`);
+    const want = (res[0].result as any[]).map((r) => String(r.id));
+    expect(want.length).toBe(10);
+    expect(got).toEqual(want);
   }, 60_000);
 
   it('tenant scope holds: another org never appears', async () => {

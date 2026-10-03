@@ -256,11 +256,17 @@ const decayStaleRelevance: UpkeepActivity = {
   id: 'decay-stale-relevance',
   name: 'Decay Stale Relevance',
   description: 'Gradually reduce relevance of concepts that are loaded but rarely succeed',
+  // Filter inside, order and limit outside: the direct form (range on the indexed relevance
+  // field + ORDER BY relevance DESC + LIMIT) returns the LOWEST rows of the range on SurrealDB
+  // 2.3.10, so this decayed the least relevant stale concepts instead of the most relevant.
+  // Same defect and fix as searchConcepts' scalar path.
   candidateQuery: `
-    SELECT * FROM concept
-    WHERE times_loaded > 10
-      AND relevance > 0.5
-      AND (times_succeeded / times_loaded) < 0.3
+    SELECT * FROM (
+      SELECT * FROM concept
+      WHERE times_loaded > 10
+        AND relevance > 0.5
+        AND (times_succeeded / times_loaded) < 0.3
+    )
     ORDER BY relevance DESC
     LIMIT 10
   `,
