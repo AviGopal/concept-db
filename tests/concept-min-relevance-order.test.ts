@@ -34,6 +34,8 @@ const ORG = 'organizations:o1';
 let proc: Subprocess | null = null;
 let startError = '';
 let searchConcepts: (req: any, orgId: string) => Promise<any[]>;
+let savedSurrealConfig: Record<string, unknown> = {};
+let restoreSurrealConfig: () => void = () => {};
 
 async function sql(text: string): Promise<any[]> {
   const r = await fetch(`${URL_}/sql`, {
@@ -82,6 +84,8 @@ beforeAll(async () => {
     // enough: re-point the config object the client reads at connect time and drop any
     // existing connection. Without this the file passes alone and fails in `bun test`.
     const { config } = await import('../src/config');
+    savedSurrealConfig = { ...config.surrealdb };
+    restoreSurrealConfig = () => Object.assign(config.surrealdb, savedSurrealConfig);
     Object.assign(config.surrealdb, { url: URL_, namespace: NS, database: DB, username: 'root', password: PASS });
     await (await import('../src/db/surreal')).surrealDB.close();
     ({ searchConcepts } = await import('../src/resolvers/concept'));
@@ -91,7 +95,12 @@ beforeAll(async () => {
   }
 }, 120_000);
 
-afterAll(() => { proc?.kill(); });
+afterAll(async () => {
+  // Hand the shared client back as found, so files that run after this one are not pointed at a dead server.
+  await (await import('../src/db/surreal')).surrealDB.close();
+  restoreSurrealConfig();
+  proc?.kill();
+});
 
 describe('concept search with min_relevance', () => {
   it('the instrument is live: surreal started, the real schema defined idx_concept_relevance, rows seeded', async () => {
@@ -168,4 +177,29 @@ describe('concept search with min_relevance', () => {
     const got = await searchConcepts({ min_relevance: 0.9, limit: 50 }, ORG);
     for (const r of got) expect(String(r.org_id)).toBe(ORG);
   }, 60_000);
+});
+
+// A future (org_id, relevance) compound index must not bring the defect back. Measured on 2.3.10: the
+// planner picks such an index (eq prefix + range tail) and orders it correctly, and the search must stay
+// exact with it present. NB this block cannot catch a revert to the direct form: the direct form is
+// correct while the compound index exists. The no-index block above is the mutation guard.
+describe('concept search with min_relevance, with an (org_id, relevance) index defined', () => {
+  beforeAll(async () => { await sql('DEFINE INDEX IF NOT EXISTS idx_concept_org_relevance ON concept FIELDS org_id, relevance;'); }, 60_000);
+  afterAll(async () => { await sql('REMOVE INDEX IF EXISTS idx_concept_org_relevance ON concept;'); });
+
+  it('the index is defined', async () => {
+    const info = await sql('INFO FOR TABLE concept;');
+    expect(Object.keys(info[0].result.indexes ?? {})).toContain('idx_concept_org_relevance');
+  }, 60_000);
+
+  for (const [label, req, min, from, to] of [
+    ['min 0.5 first page', { min_relevance: 0.5, limit: 10 }, 0.5, 0, 10],
+    ['min 0.5 offset 100 (floor fallthrough)', { min_relevance: 0.5, limit: 10, offset: 100 }, 0.5, 100, 110],
+    ['no min', { limit: 10 }, 0, 0, 10],
+  ] as const) {
+    it(`matches WITH NOINDEX: ${label}`, async () => {
+      const got = (await searchConcepts(req, ORG)).map((r: any) => String(r.id));
+      expect(got).toEqual((await truth(min, to)).slice(from, to));
+    }, 60_000);
+  }
 });
