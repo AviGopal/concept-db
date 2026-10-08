@@ -637,6 +637,12 @@ case 'relatedConcepts': {
         break;
       }
 
+      case 'concept_delete_write':
+      case 'concept_retire_write':
+      case 'concept_supersede_write':
+        // Stub to satisfy advertised shape contract. Implementation is pending.
+        throw new Error(`'${pointer.shape}' is not yet implemented.`);
+
       case 'impulseCooccurrenceEdges': {
         const pointerType =
           typeof pointer.pointer_type === 'string' ? pointer.pointer_type : undefined;
