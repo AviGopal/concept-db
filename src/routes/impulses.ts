@@ -1041,6 +1041,13 @@ case 'relatedConcepts': {
         if (config.auth.requireAuth && !jwtAuth) {
           return c.json({ success: false, error: 'Authentication required' }, 401);
         }
+        // One line per caller so the callers of this repair can be counted.
+        // Never logs the credential, only whether an auth context was present.
+        logger.info('conceptCreditDecontaminate_write requested', {
+          shape: 'conceptCreditDecontaminate_write',
+          org_id: orgId,
+          auth_context: jwtAuth ? 'yes' : 'no',
+        });
         const deconPointer = pointer as { dry_run?: boolean; min_loads?: number };
         const deconReport = await decontaminateCredit({ dry_run: deconPointer.dry_run, min_loads: deconPointer.min_loads });
         return c.json({ success: true, shape: 'conceptCreditDecontaminationReport', body: deconReport });

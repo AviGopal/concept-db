@@ -140,6 +140,7 @@ const seqR = await import('../src/resolvers/sequence');
 const deconR = await import('../src/resolvers/decontaminate');
 const impulseR = await import('../src/resolvers/impulse');
 const sourceR = await import('../src/sources/unified');
+const { logger } = await import('../src/utils/logger');
 
 // Let the startup connect settle before the first test.
 await new Promise((r) => setTimeout(r, 20));
@@ -370,5 +371,39 @@ describe('DEFENCE IN DEPTH: the root client refuses writes in an unauthenticated
     expect(scope.isWriteStatement('SELECT * FROM concept WHERE summary = "DELETE me" AND x = \'UPDATE\'')).toBe(false);
     expect(scope.isWriteStatement('  update type::thing("concept", $id) SET x = 1')).toBe(true);
     expect(scope.isWriteStatement('LET $x = (CREATE concept SET a = 1); RETURN $x')).toBe(true);
+  });
+});
+
+describe('conceptCreditDecontaminate_write logs each caller', () => {
+  const MSG = 'conceptCreditDecontaminate_write requested';
+  const pointer = { type: 'conceptCreditDecontaminate_write', dry_run: true, min_loads: 1 };
+
+  async function captureInfo(fn: () => Promise<unknown>) {
+    const seen: Array<[string, unknown]> = [];
+    const orig = logger.info.bind(logger);
+    (logger as any).info = (m: string, ctx?: unknown) => { seen.push([m, ctx]); return orig(m, ctx as any); };
+    try { await fn(); } finally { (logger as any).info = orig; }
+    return seen;
+  }
+
+  for (const [who, headers, org] of [
+    ['valid ApiKey', { Authorization: `ApiKey ${GOOD_KEY}` }, 'org-key'],
+    ['valid JWT', { Authorization: `Bearer ${VALID_JWT}` }, 'org-jwt'],
+  ] as const) {
+    test(`${who}: one line naming the shape, org_id and auth_context=yes, without the credential`, async () => {
+      const seen = await captureInfo(() => resolve(pointer, { ...headers }));
+      const lines = seen.filter(([m]) => m === MSG);
+      expect(lines.length).toBe(1);
+      expect(lines[0][1]).toEqual({ shape: 'conceptCreditDecontaminate_write', org_id: org, auth_context: 'yes' });
+      const all = JSON.stringify(seen);
+      expect(all).not.toContain(GOOD_KEY);
+      expect(all).not.toContain(VALID_JWT);
+    });
+  }
+
+  test('unauthenticated: refused before the write path, so no line and no DB call', async () => {
+    const seen = await captureInfo(() => resolve(pointer));
+    expect(seen.filter(([m]) => m === MSG)).toEqual([]);
+    expect(dbCalls).toEqual([]);
   });
 });
