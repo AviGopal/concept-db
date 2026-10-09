@@ -7,9 +7,11 @@
  *
  * JWT tokens contain org_id for multi-tenant isolation.
  *
- * Reject-by-default: when REQUIRE_AUTH=true, requests without valid auth on
- * non-public paths return 401. Route handlers can still apply their own
- * `requireAuth` guards as defense-in-depth.
+ * Reject-by-default: when REQUIRE_AUTH=true, a request to a non-public path
+ * with no Authorization header returns 401 MISSING_AUTH, and one whose
+ * credentials are not accepted returns 401 INVALID_AUTH. When REQUIRE_AUTH is
+ * false every request passes, with a null auth context when unauthenticated.
+ * Route handlers still apply their own guards as defense-in-depth.
  */
 
 import { Context, Next } from 'hono';
@@ -30,20 +32,43 @@ export interface JwtAuthContext {
 }
 
 /**
- * Paths that are publicly accessible without an Authorization header.
- * Exact match or prefix match (string ending with '/') is used.
+ * Paths that are publicly accessible without valid credentials.
+ *
+ * An `exact` entry matches only that path. A `prefix` entry (ending in '/')
+ * matches every path under it. `methods`, when given, limits the entry to
+ * those HTTP methods. The root '/' is exact: as a prefix it would match every
+ * path and make every route public.
+ *
+ * Besides /health and the service index, the public entries are the read-only
+ * routes that carry no guard by design (static tool definitions and in-process
+ * scheduler state).
  */
-const PUBLIC_PATHS: string[] = [
-  '/health',
-  '/',
+interface PublicPath {
+  path: string;
+  match: 'exact' | 'prefix';
+  methods?: readonly string[];
+}
+
+const READ_METHODS = ['GET', 'HEAD'] as const;
+
+const PUBLIC_PATHS: readonly PublicPath[] = [
+  { path: '/health', match: 'exact' },
+  { path: '/', match: 'exact' },
+  { path: '/mcp/tools', match: 'exact', methods: READ_METHODS },
+  { path: '/mcp/tools/', match: 'prefix', methods: READ_METHODS }, // GET /mcp/tools/:name
+  { path: '/upkeep/status', match: 'exact', methods: READ_METHODS },
+  { path: '/upkeep/activities', match: 'exact', methods: READ_METHODS },
+  { path: '/upkeep/activities/', match: 'prefix', methods: READ_METHODS }, // GET /upkeep/activities/:id
 ];
 
-function isPublicPath(path: string): boolean {
-  for (const allowed of PUBLIC_PATHS) {
-    if (allowed.endsWith('/')) {
-      if (path.startsWith(allowed) || path === allowed.slice(0, -1)) return true;
-    } else {
-      if (path === allowed) return true;
+export function isPublicPath(path: string, method: string = 'GET'): boolean {
+  const m = method.toUpperCase();
+  for (const entry of PUBLIC_PATHS) {
+    if (entry.methods && !entry.methods.includes(m)) continue;
+    if (entry.match === 'exact') {
+      if (path === entry.path) return true;
+    } else if (path.startsWith(entry.path) && path.length > entry.path.length) {
+      return true;
     }
   }
   return false;
@@ -136,64 +161,64 @@ async function tryIdentityValidation(
  */
 export async function jwtAuthMiddleware(c: Context, next: Next) {
   const authHeader = c.req.header('Authorization');
+  const enforce = config.auth.requireAuth && !isPublicPath(c.req.path, c.req.method);
 
   if (!authHeader) {
-    if (isPublicPath(c.req.path) || !config.auth.requireAuth) {
-      c.set('jwtAuth', null);
-      await next();
-      return;
+    c.set('jwtAuth', null);
+    if (enforce) {
+      logger.warn('Missing Authorization header on protected path', { path: c.req.path });
+      return c.json(
+        { error: { code: 'MISSING_AUTH', message: 'Authorization header required' } },
+        401,
+      );
     }
-    logger.warn('Missing Authorization header on protected path', { path: c.req.path });
+    await next();
+    return;
+  }
+
+  const jwtAuth = await resolveAuthHeader(authHeader);
+  c.set('jwtAuth', jwtAuth);
+
+  if (!jwtAuth && enforce) {
+    logger.warn('Credential validation failed on protected path', { path: c.req.path });
     return c.json(
-      { error: { code: 'MISSING_AUTH', message: 'Authorization header required' } },
+      { error: { code: 'INVALID_AUTH', message: 'Credential validation failed' } },
       401,
     );
   }
 
+  await next();
+}
+
+/**
+ * Resolve an Authorization header to an auth context, or null when the
+ * credentials are absent, malformed or not accepted.
+ */
+async function resolveAuthHeader(authHeader: string): Promise<JwtAuthContext | null> {
   // ApiKey branch — validated via identity-vessel
   const apiKeyMatch = authHeader.match(/^ApiKey\s+(.+)$/i);
   if (apiKeyMatch) {
-    const apiKey = apiKeyMatch[1];
     logger.debug('Processing ApiKey auth header');
-
-    const jwtAuth = await validateApiKey(apiKey);
-    c.set('jwtAuth', jwtAuth);
-
-    if (!jwtAuth && config.auth.requireAuth && !isPublicPath(c.req.path)) {
-      logger.warn('ApiKey validation failed on protected path', { path: c.req.path });
-      return c.json(
-        { error: { code: 'INVALID_AUTH', message: 'API key validation failed' } },
-        401,
-      );
-    }
-
-    await next();
-    return;
+    return validateApiKey(apiKeyMatch[1]);
   }
 
   // Bearer branch — JWT token validated against SurrealDB
   const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
   if (!bearerMatch) {
     logger.debug('Unrecognized auth header format');
-    c.set('jwtAuth', null);
-    await next();
-    return;
+    return null;
   }
 
   const token = bearerMatch[1];
 
   if (!token.includes('.')) {
-    c.set('jwtAuth', null);
-    await next();
-    return;
+    return null;
   }
 
   const periodCount = (token.match(/\./g) || []).length;
   if (periodCount !== 2) {
     logger.warn('Malformed JWT token structure', { periodCount });
-    c.set('jwtAuth', null);
-    await next();
-    return;
+    return null;
   }
 
   try {
@@ -224,9 +249,7 @@ export async function jwtAuthMiddleware(c: Context, next: Next) {
 
     if (!auth) {
       logger.warn('JWT valid but no auth claims found');
-      c.set('jwtAuth', null);
-      await next();
-      return;
+      return null;
     }
 
     const jwtAuth: JwtAuthContext = {
@@ -246,15 +269,12 @@ export async function jwtAuthMiddleware(c: Context, next: Next) {
       projectId: jwtAuth.projectId,
     });
 
-    c.set('jwtAuth', jwtAuth);
-
+    return jwtAuth;
   } catch (error) {
     const err = error as Error;
     logger.debug('JWT authentication failed', { error: err.message });
-    c.set('jwtAuth', null);
+    return null;
   }
-
-  await next();
 }
 
 /**
