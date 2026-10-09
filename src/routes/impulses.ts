@@ -16,10 +16,11 @@
  * Unknown shapes return 400 with a clear error listing the supported set.
  */
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { getJwtAuthFromContext } from '../middleware/jwtAuth';
 import { logger } from '../utils/logger';
 import { config } from '../config';
+import { runInRequestAuthScope } from '../db/request-auth-scope';
 import {
   resolveConcept,
   getNeighbors,
@@ -85,6 +86,36 @@ const SUPPORTED_SHAPES = [
   // docs/specs/discovery-to-tools-bridge.md.
   'mcpTool',
 ] as const;
+
+/**
+ * Shapes an unauthenticated caller may resolve. Every entry is a pure read: it
+ * performs no state-changing statement, including passive usage counters.
+ * Any shape not listed here (including unknown shapes and every `*_write`
+ * shape) requires an authenticated caller, whatever REQUIRE_AUTH says.
+ *
+ * `concept` is listed only for its search form; with `concept_id` it resolves
+ * the concept and records the load (UPDATE times_loaded / resolution_snapshot),
+ * so that form requires an authenticated caller.
+ */
+export const UNAUTHENTICATED_READ_SHAPES: readonly string[] = [
+  'mcpTool',
+  'resolver_schema',
+  'concept',
+  'conceptSearch',
+  'conceptGraph',
+  'relatedConcepts',
+  'conceptUsageStats',
+  'conceptSequence',
+  'impulseCooccurrenceEdges',
+  'embed',
+  'cluster',
+];
+
+export function unauthenticatedResolveAllowed(shape: string, pointer: Record<string, unknown>): boolean {
+  if (!UNAUTHENTICATED_READ_SHAPES.includes(shape)) return false;
+  if (shape === 'concept' && pointer.concept_id) return false;
+  return true;
+}
 
 /**
  * Emit a `conceptUpkeepAuditLog` impulse for a write resolver call.
@@ -392,7 +423,14 @@ function buildMcpToolResponse(
  * Response (400): unknown shape
  * Response (500): resolver error
  */
-impulses.post('/resolve', async (c) => {
+impulses.post('/resolve', (c) =>
+  // Every DB call this request reaches runs in a scope that knows whether the
+  // caller is authenticated; the root client refuses writes in an
+  // unauthenticated scope (see db/request-auth-scope.ts).
+  runInRequestAuthScope(getJwtAuthFromContext(c) != null, () => resolveImpulse(c)),
+);
+
+async function resolveImpulse(c: Context): Promise<Response> {
   const jwtAuth = getJwtAuthFromContext(c);
   const orgId = jwtAuth?.orgId || 'default';
   const jwtToken = jwtAuth?.jwtToken;
@@ -416,6 +454,24 @@ impulses.post('/resolve', async (c) => {
   const shape = pointer.type;
   if (typeof shape !== 'string') {
     return c.json({ error: 'Missing or invalid pointer.type' }, 400);
+  }
+
+  // Unauthenticated callers may resolve only the read allowlist. This holds
+  // regardless of REQUIRE_AUTH, and is checked before any resolver runs.
+  if (!jwtAuth && !unauthenticatedResolveAllowed(shape, pointer)) {
+    return c.json(
+      {
+        success: false,
+        error: 'Authentication required',
+        code: 'AUTH_REQUIRED',
+        shape,
+        message:
+          `Shape "${shape}"${shape === 'concept' ? ' with concept_id' : ''} requires an authenticated caller ` +
+          '(Authorization: ApiKey <key> or Bearer <jwt>).',
+        unauthenticated_read_shapes: UNAUTHENTICATED_READ_SHAPES,
+      },
+      401,
+    );
   }
 
   try {
@@ -1105,6 +1161,6 @@ case 'relatedConcepts': {
       500,
     );
   }
-});
+}
 
 export { impulses };

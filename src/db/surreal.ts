@@ -6,6 +6,7 @@
 import { Surreal } from 'surrealdb';
 import { config } from '../config';
 import { logger } from '../utils/logger';
+import { assertRootWriteAllowed } from './request-auth-scope';
 
 // SurrealDB 2.x root signin returns a JWT with a TTL (default 1h). When that
 // token expires, subsequent queries fail with either "The token has expired"
@@ -153,6 +154,9 @@ class SurrealDBClient {
   }
 
   async query<T = unknown>(sql: string, params?: Record<string, unknown>): Promise<T[]> {
+    // The root client bypasses PERMISSIONS, so a state-changing statement is
+    // refused here when the request that reached it has no authenticated caller.
+    assertRootWriteAllowed(sql);
     await this.connect();
 
     if (!this.db) {
