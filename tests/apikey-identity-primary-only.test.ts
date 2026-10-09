@@ -96,8 +96,9 @@ beforeAll(async () => {
   app = new Hono();
   app.use('*', mw.jwtAuthMiddleware);
   // Mirrors the route handlers' own guard (`config.auth.requireAuth && !jwtAuth` -> 401).
-  // The middleware itself lets every path through when the key is not accepted, because
-  // PUBLIC_PATHS contains '/', which prefix-matches every path.
+  // Under REQUIRE_AUTH the middleware refuses a non-public path itself (MISSING_AUTH /
+  // INVALID_AUTH) before this handler runs, so a refused response may carry no jwtAuth
+  // field at all; the assertions read an absent field as "no context".
   app.get('/probe', (c) => {
     const jwtAuth = mw.getJwtAuthFromContext(c) ?? null;
     if (config.auth.requireAuth && !jwtAuth) {
@@ -138,7 +139,7 @@ describe('ApiKey validation: primary failure is never retried elsewhere', () => 
       expect(nonPrimaryCalls()).toEqual([]);
       expect(calls.length).toBe(1);
       expect(calls[0].url).toBe(`${PRIMARY}/v1/auth/resolve`);
-      expect(json.jwtAuth).toBeNull();
+      expect(json.jwtAuth ?? null).toBeNull();
       expect(status).toBe(401);
     });
   }
@@ -149,7 +150,7 @@ describe('ApiKey validation: primary failure is never retried elsewhere', () => 
       const { status, json } = await probe('ApiKey some-key');
       expect(nonPrimaryCalls()).toEqual([]);
       expect(calls.length).toBe(1);
-      expect(json.jwtAuth).toBeNull();
+      expect(json.jwtAuth ?? null).toBeNull();
       expect(status).toBe(401);
     });
   }
@@ -160,7 +161,7 @@ describe('ApiKey validation: primary failure is never retried elsewhere', () => 
     const { status, json } = await probe('ApiKey some-key');
     expect(nonPrimaryCalls()).toEqual([]);
     expect(status).toBe(200);
-    expect(json.jwtAuth).toBeNull();
+    expect(json.jwtAuth ?? null).toBeNull();
   });
 
   test('REQUIRE_AUTH=false: transient primary failure leaves the request anonymous, no other URL contacted', async () => {
@@ -169,7 +170,7 @@ describe('ApiKey validation: primary failure is never retried elsewhere', () => 
     const { status, json } = await probe('ApiKey some-key');
     expect(nonPrimaryCalls()).toEqual([]);
     expect(status).toBe(200);
-    expect(json.jwtAuth).toBeNull();
+    expect(json.jwtAuth ?? null).toBeNull();
   });
 });
 
@@ -196,7 +197,7 @@ describe('controls: unchanged behaviour', () => {
     elsewhereAccepts = false;
     primaryMode = 'reject-body';
     const { status, json } = await probe('ApiKey bad-key');
-    expect(json.jwtAuth).toBeNull();
+    expect(json.jwtAuth ?? null).toBeNull();
     expect(status).toBe(401);
     expect(calls[0].url).toBe(`${PRIMARY}/v1/auth/resolve`);
   });
@@ -204,7 +205,7 @@ describe('controls: unchanged behaviour', () => {
   test('missing Authorization -> no context, no fetch', async () => {
     const res = await app.request('/probe');
     expect(res.status).toBe(401);
-    expect(((await res.json()) as { jwtAuth: unknown }).jwtAuth).toBeNull();
+    expect(((await res.json()) as { jwtAuth?: unknown }).jwtAuth ?? null).toBeNull();
     expect(calls).toEqual([]);
   });
 
@@ -237,7 +238,7 @@ describe('controls: unchanged behaviour', () => {
     jwtAuthenticateFails = true;
     const { status, json } = await probe('Bearer aaa.bbb.ccc');
     expect(status).toBe(200);
-    expect(json.jwtAuth).toBeNull();
+    expect(json.jwtAuth ?? null).toBeNull();
     expect(calls).toEqual([]);
   });
 });

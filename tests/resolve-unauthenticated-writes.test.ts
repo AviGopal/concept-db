@@ -181,9 +181,14 @@ const UNIMPLEMENTED_WRITES = ['concept_delete_write', 'concept_retire_write', 'c
 
 function expectRefused(r: { status: number; body: any }) {
   expect(r.status).toBe(401);
+  expect(dbCalls).toEqual([]);
+  if (config.auth.requireAuth && typeof r.body?.error === 'object') {
+    // Under REQUIRE_AUTH the auth middleware may refuse before the route runs.
+    expect(['MISSING_AUTH', 'INVALID_AUTH']).toContain(r.body.error.code);
+    return;
+  }
   expect(r.body?.success).toBe(false);
   expect(r.body?.error).toBe('Authentication required');
-  expect(dbCalls).toEqual([]);
 }
 
 describe('MUST-FAIL: an unauthenticated writing shape is refused with zero DB calls', () => {
