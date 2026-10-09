@@ -52,27 +52,11 @@ function isPublicPath(path: string): boolean {
 /**
  * Validate API key via identity-vessel.
  *
- * Tries the internal cluster URL first, then falls back to the external
- * endpoint (IDENTITY_VESSEL_EXTERNAL_URL) if the primary is unreachable.
+ * Only the configured in-fleet identity endpoint is consulted. If it rejects
+ * the key, errors, or is unreachable, the key is not accepted.
  */
 async function validateApiKey(apiKey: string): Promise<JwtAuthContext | null> {
-  const primaryUrl = config.metabob.identityEndpoint;
-  const fallbackUrl =
-    process.env.IDENTITY_VESSEL_EXTERNAL_URL || 'https://identity.metabob.com';
-
-  const result = await tryIdentityValidation(apiKey, primaryUrl);
-  if (result) return result;
-
-  // If primary failed, try external fallback (only when different)
-  if (primaryUrl !== fallbackUrl) {
-    logger.info('[ApiKey] Primary identity-vessel unreachable, trying external fallback', {
-      primaryUrl,
-      fallbackUrl,
-    });
-    return tryIdentityValidation(apiKey, fallbackUrl);
-  }
-
-  return null;
+  return tryIdentityValidation(apiKey, config.metabob.identityEndpoint);
 }
 
 async function tryIdentityValidation(
