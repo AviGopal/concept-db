@@ -70,6 +70,13 @@ describe('/v2/impulses/resolve → impulseSignatureConcept', () => {
   let concepts: ConceptRow[];
   let spy: ReturnType<typeof spyOn>;
   const app = new Hono();
+  // Writing and unknown shapes require an authenticated caller. These tests exercise
+  // dispatch as an ApiKey caller: an empty jwtToken keeps the root-client path and
+  // org 'default', the same DB path the tests covered before.
+  app.use('*', async (c, next) => {
+    c.set('jwtAuth', { jwtToken: '', orgId: 'default', authType: 'apikey' });
+    await next();
+  });
   app.route('/v2/impulses', impulses);
 
   beforeEach(() => {
