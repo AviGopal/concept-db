@@ -20,9 +20,13 @@ delete process.env.IDENTITY_VESSEL_EXTERNAL_URL;
 process.env.REQUIRE_AUTH = 'true';
 
 // JWT branch: stand in for SurrealDB so the Bearer path can be exercised offline.
+// In a whole-suite, one-process run a module mock outlives this file, so the mock
+// keeps every other export of the real module and afterAll puts the module back.
 let jwtClaims: Record<string, unknown> | null = null;
 let jwtAuthenticateFails = false;
+const previousSurrealModule = { ...(await import('../src/db/surreal')) };
 mock.module('../src/db/surreal', () => ({
+  ...previousSurrealModule,
   createAuthenticatedClient: async (_token: string) => {
     if (jwtAuthenticateFails) throw new Error('Authentication failed');
     return {
@@ -87,12 +91,16 @@ function recorder(url: string | URL | Request, init?: RequestInit): Promise<Resp
 }
 
 let app: Hono;
-let config: { auth: { requireAuth: boolean } };
+let config: { auth: { requireAuth: boolean }; metabob: { identityEndpoint: string } };
+let savedIdentityEndpoint = '';
 
 beforeAll(async () => {
   globalThis.fetch = recorder as typeof fetch;
   const mw = await import('../src/middleware/jwtAuth');
   config = (await import('../src/config')).config as unknown as typeof config;
+  // The env above only reaches config when this file is the first to load it.
+  savedIdentityEndpoint = config.metabob.identityEndpoint;
+  config.metabob.identityEndpoint = PRIMARY;
   app = new Hono();
   app.use('*', mw.jwtAuthMiddleware);
   // Mirrors the route handlers' own guard (`config.auth.requireAuth && !jwtAuth` -> 401).
@@ -110,6 +118,10 @@ beforeAll(async () => {
 
 afterAll(() => {
   globalThis.fetch = originalFetch;
+  config.metabob.identityEndpoint = savedIdentityEndpoint;
+  jwtClaims = null;
+  jwtAuthenticateFails = false;
+  mock.module('../src/db/surreal', () => previousSurrealModule);
 });
 
 beforeEach(() => {

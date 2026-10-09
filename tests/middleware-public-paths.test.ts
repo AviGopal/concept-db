@@ -10,9 +10,12 @@
  * The real app (src/index.ts) and a probe app with an UNGUARDED route behind the
  * real middleware are driven in-process. Only the database driver, the embedding
  * model and outbound fetch are stubbed.
+ *
+ * Hermetic in a whole-suite, one-process run: see "One-process isolation" and
+ * "Network guard" below. No test here may open a real network connection.
  */
 
-import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, afterAll, mock } from 'bun:test';
 import { Hono } from 'hono';
 
 process.env.NODE_ENV = 'test';
@@ -23,20 +26,44 @@ process.env.DISCOVERY_ENABLED = 'false';
 process.env.UPKEEP_ENABLED = 'false';
 process.env.OBSERVER_ENABLED = 'false';
 process.env.DENSE_BACKFILL_ENABLED = 'false';
-process.env.SURREALDB_URL = 'http://db-stub.test:1';
-process.env.ACTIVITY_API_URL = 'http://activity-api-stub.test:1';
+const DB_STUB_URL = 'http://db-stub.test:1';
+const IDENTITY_STUB_URL = 'http://identity-stub.test:1';
+const ACTIVITY_API_STUB_URL = 'http://activity-api-stub.test:1';
+process.env.SURREALDB_URL = DB_STUB_URL;
+process.env.ACTIVITY_API_URL = ACTIVITY_API_STUB_URL;
+
+// ---- Network guard ----------------------------------------------------------
+// Every outbound fetch must go to a stub origin below, and no WebSocket may be
+// opened. Database traffic never goes through fetch: the driver is stubbed, so a
+// fetch to any database URL means the stub was bypassed. jwtAuth turns a thrown
+// error into "not authenticated", so a trip is also recorded and fails the test
+// that caused it (afterEach) and the summary test at the end of the file.
+const ALLOWED_FETCH_ORIGINS = new Set([new URL(IDENTITY_STUB_URL).origin, new URL(ACTIVITY_API_STUB_URL).origin]);
+const forbiddenNet: string[] = [];
+function forbidNetwork(what: string): never {
+  forbiddenNet.push(what);
+  throw new Error(`NETWORK GUARD: ${what}`);
+}
+const originalWebSocket = globalThis.WebSocket;
+(globalThis as any).WebSocket = class GuardedWebSocket {
+  constructor(url: unknown) { forbidNetwork(`WebSocket ${String(url)}`); }
+};
 
 const GOOD_KEY = 'good-key';
 const VALID_JWT = 'header.payload.signature';
 const dbCalls: string[] = [];
+// Positive controls: what reached THIS file's driver stub.
+const connectCalls: string[] = [];
+const authenticateCalls: string[] = [];
 
 class FakeSurreal {
   private token: string | null = null;
-  async connect() {}
+  async connect(url: unknown) { connectCalls.push(String(url)); }
   async use() {}
   async signin() {}
   async close() {}
   async authenticate(token: string) {
+    authenticateCalls.push(token);
     if (token !== VALID_JWT) throw new Error('Authentication failed');
     this.token = token;
   }
@@ -67,8 +94,13 @@ mock.module('../src/services/embedding', () => ({
 }));
 
 const originalFetch = globalThis.fetch;
+const outbound: string[] = [];
 globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
+  outbound.push(url);
+  let origin = '';
+  try { origin = new URL(url).origin; } catch { /* not a URL */ }
+  if (!ALLOWED_FETCH_ORIGINS.has(origin)) forbidNetwork(`fetch ${url}`);
   if (url.endsWith('/v1/auth/resolve')) {
     const key = JSON.parse(String(init?.body ?? '{}'))?.impulse?.pointer?.apiKey;
     if (key === GOOD_KEY) {
@@ -82,9 +114,36 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
   return new Response('{}', { status: 200 });
 }) as typeof fetch;
 
+// ---- One-process isolation ---------------------------------------------------
+// A whole-suite `bun test` run shares one module registry across files. Before
+// this file runs, another file may already have: loaded src/config with the
+// default database and identity URLs; mocked src/db/surreal with a partial stub
+// whose JWT path refuses (tests/apikey-identity-primary-only.test.ts); and
+// connected the root client singleton to its own driver stub, or, where a real
+// database answers on the default URL, to that database. So this file pins the
+// config fields it depends on to stub values, loads its own instance of
+// src/db/surreal (bound to FakeSurreal above, sharing the request auth scope),
+// installs it under the shared specifier before importing the app, and restores
+// all of it in afterAll so later files see what they saw before.
+const { config } = await import('../src/config');
+// The env above only reaches config when this file is the first to load it.
+const configPins: Array<[Record<string, unknown>, string, unknown]> = [
+  [config.surrealdb, 'url', DB_STUB_URL],
+  [config.metabob, 'identityEndpoint', IDENTITY_STUB_URL],
+  [config.activityApi, 'url', ACTIVITY_API_STUB_URL],
+  [config.discovery, 'enabled', false],
+  [config.upkeep, 'enabled', false],
+  [config.observer, 'enabled', false],
+];
+const savedConfig = configPins.map(([obj, key]) => obj[key]);
+for (const [obj, key, value] of configPins) obj[key] = value;
+const previousSurrealModule = { ...(await import('../src/db/surreal')) };
+const HERMETIC_SURREAL = '../src/db/surreal.ts?hermetic=middleware-public-paths';
+const hermeticSurreal = await import(HERMETIC_SURREAL);
+mock.module('../src/db/surreal', () => ({ ...hermeticSurreal }));
+
 const mod = await import('../src/index');
 const fetchApp = (mod as any).default.fetch as (r: Request) => Promise<Response>;
-const { config } = await import('../src/config');
 const mw = await import('../src/middleware/jwtAuth');
 const { logger } = await import('../src/utils/logger');
 await new Promise((r) => setTimeout(r, 20));
@@ -100,6 +159,18 @@ probe.all('/probe-unguarded', (c) => {
 
 afterAll(() => {
   globalThis.fetch = originalFetch;
+  (globalThis as any).WebSocket = originalWebSocket;
+  configPins.forEach(([obj, key], i) => { obj[key] = savedConfig[i]; });
+  mock.module('../src/db/surreal', () => previousSurrealModule);
+});
+
+let forbiddenSeen = 0;
+afterEach(() => {
+  if (forbiddenNet.length > forbiddenSeen) {
+    const tripped = forbiddenNet.slice(forbiddenSeen);
+    forbiddenSeen = forbiddenNet.length;
+    throw new Error(`NETWORK GUARD tripped: ${tripped.join('; ')}`);
+  }
 });
 
 beforeEach(() => {
@@ -126,6 +197,30 @@ async function call(
   try { body = await res.json(); } catch { body = null; }
   return { status: res.status, body };
 }
+
+describe('ISOLATION: the auth paths run against this file\'s stubs', () => {
+  test('a valid JWT is authenticated by this file\'s driver stub', async () => {
+    authenticateCalls.length = 0;
+    const r = await call('probe', 'POST', '/probe-unguarded', { auth: `Bearer ${VALID_JWT}` });
+    expect(authenticateCalls).toContain(VALID_JWT);
+    expect(r.body?.jwtAuth?.orgId).toBe('org-jwt');
+  });
+
+  test('a valid ApiKey is validated by the identity stub', async () => {
+    outbound.length = 0;
+    const r = await call('probe', 'POST', '/probe-unguarded', { auth: `ApiKey ${GOOD_KEY}` });
+    expect(outbound).toContain(`${IDENTITY_STUB_URL}/v1/auth/resolve`);
+    expect(r.body?.jwtAuth?.orgId).toBe('org-key');
+  });
+
+  test('root queries reach this file\'s driver stub at the stub URL', async () => {
+    const r = await call('app', 'GET', '/concepts/concept_c1');
+    expect(dbCalls.length).toBeGreaterThan(0);
+    expect(connectCalls.length).toBeGreaterThan(0);
+    expect(connectCalls.every((u) => u === DB_STUB_URL)).toBe(true);
+    expect(r.status).toBeLessThan(500);
+  });
+});
 
 describe('MUST-FAIL: REQUIRE_AUTH=true, the middleware refuses non-public paths', () => {
   beforeEach(() => { config.auth.requireAuth = true; });
@@ -303,5 +398,11 @@ describe('[auth-refused]: the middleware logs one line per refusal, never the cr
     const b = await captureAll(() => call('probe', 'POST', '/probe-unguarded'));
     expect(a.refused).toEqual([]);
     expect(b.refused).toEqual([]);
+  });
+});
+
+describe('NETWORK GUARD', () => {
+  test('no test in this file attempted a real network connection', () => {
+    expect(forbiddenNet).toEqual([]);
   });
 });
