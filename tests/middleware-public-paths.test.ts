@@ -86,6 +86,7 @@ const mod = await import('../src/index');
 const fetchApp = (mod as any).default.fetch as (r: Request) => Promise<Response>;
 const { config } = await import('../src/config');
 const mw = await import('../src/middleware/jwtAuth');
+const { logger } = await import('../src/utils/logger');
 await new Promise((r) => setTimeout(r, 20));
 
 // The mutant "route guard removed": a handler with no guard of its own.
@@ -259,5 +260,48 @@ describe('CONTROL: REQUIRE_AUTH=false, unauthenticated requests still pass the m
     expect(r.body?.error).toBe('Authentication required');
     expect(r.body?.code).toBe('AUTH_REQUIRED');
     expect(dbCalls).toEqual([]);
+  });
+});
+
+describe('[auth-refused]: the middleware logs one line per refusal, never the credential', () => {
+  const FAKE_KEY = 'FAKEKEY-mw-0xC0FFEE-recognisable';
+
+  async function captureAll(fn: () => Promise<unknown>) {
+    const lines: Array<{ msg: string; ctx: any }> = [];
+    const levels = ['debug', 'info', 'warn', 'error'] as const;
+    const orig = levels.map((l) => (logger as any)[l]);
+    levels.forEach((l, i) => {
+      (logger as any)[l] = (m: string, ctx?: unknown) => { lines.push({ msg: m, ctx }); return orig[i].call(logger, m, ctx); };
+    });
+    try { await fn(); } finally { levels.forEach((l, i) => { (logger as any)[l] = orig[i]; }); }
+    return { lines, refused: lines.filter((x) => x.msg === '[auth-refused]') };
+  }
+
+  test('REQUIRE_AUTH=true, no credentials → one middleware MISSING_AUTH line', async () => {
+    config.auth.requireAuth = true;
+    const { refused } = await captureAll(() => call('app', 'POST', '/v2/impulses/resolve', {
+      body: { pointer: { type: 'impulseSignatureConcept', pointer_type: 'p', shape: 's' } },
+    }));
+    expect(refused.length).toBe(1);
+    expect(refused[0].ctx).toEqual({
+      route: 'POST /v2/impulses/resolve', layer: 'middleware', reason: 'MISSING_AUTH', caller_hint: 'unknown',
+    });
+  });
+
+  test('REQUIRE_AUTH=true, rejected ApiKey → one middleware INVALID_AUTH line without the key', async () => {
+    config.auth.requireAuth = true;
+    const { lines, refused } = await captureAll(() => call('probe', 'POST', '/probe-unguarded', { auth: `ApiKey ${FAKE_KEY}` }));
+    expect(refused.length).toBe(1);
+    expect(refused[0].ctx).toMatchObject({ route: 'POST /probe-unguarded', layer: 'middleware', reason: 'INVALID_AUTH' });
+    expect(JSON.stringify(lines)).not.toContain(FAKE_KEY);
+  });
+
+  test('CONTROL: public path and REQUIRE_AUTH=false pass without a line', async () => {
+    config.auth.requireAuth = true;
+    const a = await captureAll(() => call('app', 'GET', '/health'));
+    config.auth.requireAuth = false;
+    const b = await captureAll(() => call('probe', 'POST', '/probe-unguarded'));
+    expect(a.refused).toEqual([]);
+    expect(b.refused).toEqual([]);
   });
 });

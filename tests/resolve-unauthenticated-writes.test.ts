@@ -407,3 +407,92 @@ describe('conceptCreditDecontaminate_write logs each caller', () => {
     expect(dbCalls).toEqual([]);
   });
 });
+
+describe('[auth-refused]: one log line per refusal, never the credential', () => {
+  const FAKE_KEY = 'FAKEKEY-zz9-plural-z-alpha-0xDEADBEEF';
+  const FAKE_JWT = 'eyFAKE.eyCREDENTIAL.sigFAKECRED';
+
+  async function captureAll(fn: () => Promise<unknown>) {
+    const lines: Array<{ level: string; msg: string; ctx: any }> = [];
+    const levels = ['debug', 'info', 'warn', 'error'] as const;
+    const orig = levels.map((l) => (logger as any)[l]);
+    levels.forEach((l, i) => {
+      (logger as any)[l] = (m: string, ctx?: unknown) => { lines.push({ level: l, msg: m, ctx }); return orig[i].call(logger, m, ctx); };
+    });
+    try { await fn(); } finally { levels.forEach((l, i) => { (logger as any)[l] = orig[i]; }); }
+    return { lines, refused: lines.filter((x) => x.msg === '[auth-refused]') };
+  }
+
+  for (const [name, pointer] of WRITING) {
+    test(`MUST-FAIL: unauthenticated ${name} → exactly one shape_guard line, no credential bytes`, async () => {
+      const { lines, refused } = await captureAll(() => resolve(pointer, {
+        Authorization: `ApiKey ${FAKE_KEY}`,
+        'x-forwarded-for': '10.1.2.3',
+        'x-libp2p-peer-id': '12D3KooWPeer',
+        'x-libp2p-auth-token': 'SECRET-IN-PEER-HEADER',
+      }));
+      expect(refused.length).toBe(1);
+      expect(refused[0].ctx).toEqual({
+        route: 'POST /v2/impulses/resolve',
+        shape: String(pointer.type),
+        layer: 'shape_guard',
+        reason: 'AUTH_REQUIRED: shape requires an authenticated caller',
+        caller_hint: 'x-forwarded-for=10.1.2.3 x-libp2p-peer-id=12D3KooWPeer',
+      });
+      const all = JSON.stringify(lines);
+      expect(all).not.toContain(FAKE_KEY);
+      expect(all).not.toContain('SECRET-IN-PEER-HEADER');
+      expect(dbCalls).toEqual([]);
+    });
+  }
+
+  test('no transport header → caller_hint "unknown" (no server address in-process)', async () => {
+    const { refused } = await captureAll(() => resolve({ type: 'impulseSignatureConcept', pointer_type: 'p', shape: 's' }));
+    expect(refused.length).toBe(1);
+    expect(refused[0].ctx.caller_hint).toBe('unknown');
+  });
+
+  test('a failed JWT is not logged either', async () => {
+    const { lines, refused } = await captureAll(() => resolve(WRITING[0][1], { Authorization: `Bearer ${FAKE_JWT}` }));
+    expect(refused.length).toBe(1);
+    expect(JSON.stringify(lines)).not.toContain('eyCREDENTIAL');
+  });
+
+  test('root layer refusal (writing shape wrongly allowlisted) → one root_write line', async () => {
+    const list = (impulsesMod as any).UNAUTHENTICATED_READ_SHAPES as string[];
+    list.push('impulseSignatureConcept');
+    try {
+      const { lines, refused } = await captureAll(() => resolve(
+        { type: 'impulseSignatureConcept', pointer_type: 'p', shape: 's' },
+        { Authorization: `ApiKey ${FAKE_KEY}`, 'x-substrate-vessel': 'probe-vessel' },
+      ));
+      expect(refused.length).toBe(1);
+      expect(refused[0].ctx).toEqual({
+        route: 'POST /v2/impulses/resolve',
+        shape: 'impulseSignatureConcept',
+        layer: 'root_write',
+        reason: 'state-changing statement without an authenticated caller',
+        caller_hint: 'x-substrate-vessel=probe-vessel',
+      });
+      expect(JSON.stringify(lines)).not.toContain(FAKE_KEY);
+      expect(writes()).toEqual([]);
+    } finally {
+      list.splice(list.indexOf('impulseSignatureConcept'), 1);
+    }
+  });
+
+  for (const [who, headers] of [
+    ['valid ApiKey', { Authorization: `ApiKey ${GOOD_KEY}` }],
+    ['valid JWT', { Authorization: `Bearer ${VALID_JWT}` }],
+  ] as const) {
+    test(`CONTROL: ${who} writes emit no [auth-refused] line`, async () => {
+      for (const requireAuth of [false, true]) {
+        config.auth.requireAuth = requireAuth;
+        for (const [, pointer] of WRITING) {
+          const { refused } = await captureAll(() => resolve(pointer, { ...headers }));
+          expect(refused).toEqual([]);
+        }
+      }
+    });
+  }
+});

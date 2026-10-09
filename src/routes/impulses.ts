@@ -20,7 +20,8 @@ import { Hono, type Context } from 'hono';
 import { getJwtAuthFromContext } from '../middleware/jwtAuth';
 import { logger } from '../utils/logger';
 import { config } from '../config';
-import { runInRequestAuthScope } from '../db/request-auth-scope';
+import { runInRequestAuthScope, currentRequestAuthScope } from '../db/request-auth-scope';
+import { logAuthRefused, callerHint } from '../utils/auth-refusal-log';
 import {
   resolveConcept,
   getNeighbors,
@@ -427,7 +428,10 @@ impulses.post('/resolve', (c) =>
   // Every DB call this request reaches runs in a scope that knows whether the
   // caller is authenticated; the root client refuses writes in an
   // unauthenticated scope (see db/request-auth-scope.ts).
-  runInRequestAuthScope(getJwtAuthFromContext(c) != null, () => resolveImpulse(c)),
+  runInRequestAuthScope(getJwtAuthFromContext(c) != null, () => resolveImpulse(c), {
+    route: `${c.req.method} ${c.req.path}`,
+    callerHint: callerHint(c),
+  }),
 );
 
 async function resolveImpulse(c: Context): Promise<Response> {
@@ -456,9 +460,19 @@ async function resolveImpulse(c: Context): Promise<Response> {
     return c.json({ error: 'Missing or invalid pointer.type' }, 400);
   }
 
+  const scope = currentRequestAuthScope();
+  if (scope) scope.shape = shape;
+
   // Unauthenticated callers may resolve only the read allowlist. This holds
   // regardless of REQUIRE_AUTH, and is checked before any resolver runs.
   if (!jwtAuth && !unauthenticatedResolveAllowed(shape, pointer)) {
+    logAuthRefused({
+      route: `${c.req.method} ${c.req.path}`,
+      shape,
+      layer: 'shape_guard',
+      reason: 'AUTH_REQUIRED: shape requires an authenticated caller',
+      caller_hint: scope?.callerHint ?? callerHint(c),
+    });
     return c.json(
       {
         success: false,

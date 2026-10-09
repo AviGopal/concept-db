@@ -18,6 +18,7 @@ import { Context, Next } from 'hono';
 import { createAuthenticatedClient } from '../db/surreal';
 import { config } from '../config';
 import { logger } from '../utils/logger';
+import { logAuthRefused, callerHint } from '../utils/auth-refusal-log';
 
 export interface JwtAuthContext {
   jwtToken: string;
@@ -166,7 +167,12 @@ export async function jwtAuthMiddleware(c: Context, next: Next) {
   if (!authHeader) {
     c.set('jwtAuth', null);
     if (enforce) {
-      logger.warn('Missing Authorization header on protected path', { path: c.req.path });
+      logAuthRefused({
+        route: `${c.req.method} ${c.req.path}`,
+        layer: 'middleware',
+        reason: 'MISSING_AUTH',
+        caller_hint: callerHint(c),
+      });
       return c.json(
         { error: { code: 'MISSING_AUTH', message: 'Authorization header required' } },
         401,
@@ -180,7 +186,12 @@ export async function jwtAuthMiddleware(c: Context, next: Next) {
   c.set('jwtAuth', jwtAuth);
 
   if (!jwtAuth && enforce) {
-    logger.warn('Credential validation failed on protected path', { path: c.req.path });
+    logAuthRefused({
+      route: `${c.req.method} ${c.req.path}`,
+      layer: 'middleware',
+      reason: 'INVALID_AUTH',
+      caller_hint: callerHint(c),
+    });
     return c.json(
       { error: { code: 'INVALID_AUTH', message: 'Credential validation failed' } },
       401,

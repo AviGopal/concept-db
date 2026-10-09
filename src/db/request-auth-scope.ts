@@ -15,15 +15,24 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { logAuthRefused } from '../utils/auth-refusal-log';
 
 export interface RequestAuthScope {
   authenticated: boolean;
+  /** For the refusal log line: the request's route, shape and caller hint. */
+  route?: string;
+  shape?: string;
+  callerHint?: string;
 }
 
 const storage = new AsyncLocalStorage<RequestAuthScope>();
 
-export function runInRequestAuthScope<T>(authenticated: boolean, fn: () => T): T {
-  return storage.run({ authenticated }, fn);
+export function runInRequestAuthScope<T>(
+  authenticated: boolean,
+  fn: () => T,
+  meta: Omit<RequestAuthScope, 'authenticated'> = {},
+): T {
+  return storage.run({ ...meta, authenticated }, fn);
 }
 
 export function currentRequestAuthScope(): RequestAuthScope | undefined {
@@ -64,6 +73,14 @@ export class UnauthenticatedWriteError extends Error {
 /** Throws when a state-changing statement would run on the root client without an auth context. */
 export function assertRootWriteAllowed(sql: string): void {
   if (inUnauthenticatedRequestScope() && isWriteStatement(sql)) {
+    const scope = storage.getStore();
+    logAuthRefused({
+      route: scope?.route ?? 'unknown',
+      shape: scope?.shape,
+      layer: 'root_write',
+      reason: 'state-changing statement without an authenticated caller',
+      caller_hint: scope?.callerHint ?? 'unknown',
+    });
     throw new UnauthenticatedWriteError();
   }
 }
