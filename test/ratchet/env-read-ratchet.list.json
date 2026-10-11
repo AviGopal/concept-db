@@ -1,0 +1,247 @@
+[
+  {
+    "name": "<dynamic>@src/config.ts:process.env[key]#1",
+    "class": "bootstrap",
+    "reason": "parseEnvInt helper plumbing; every name it serves is resolved at its call site and classified individually (read in src/config.ts)"
+  },
+  {
+    "name": "<dynamic>@src/config.ts:process.env[key]#2",
+    "class": "bootstrap",
+    "reason": "parseEnvBool helper plumbing; every name it serves is resolved at its call site and classified individually (read in src/config.ts)"
+  },
+  {
+    "name": "ACTIVITY_API_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: activity-api (read in src/config.ts, src/lifecycle/bus.ts)"
+  },
+  {
+    "name": "ACTIVITY_API_TIMEOUT",
+    "class": "behaviour",
+    "reason": "activity-api client timeout (read in src/config.ts)"
+  },
+  {
+    "name": "ACTIVITY_API_URL",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: activity-api (alternate name) (read in src/config.ts, src/lifecycle/bus.ts)"
+  },
+  {
+    "name": "BUN_ENV",
+    "class": "bootstrap",
+    "reason": "test-only flag: lets tests run without a namespace (read in src/config.ts)"
+  },
+  {
+    "name": "CONCEPT_DENSE_BUDGET_MS",
+    "class": "behaviour",
+    "reason": "dense search time budget (read in src/resolvers/concept.ts)"
+  },
+  {
+    "name": "CORS_ORIGINS",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: allowed browser origins of this endpoint (read in src/config.ts)"
+  },
+  {
+    "name": "DENSE_BACKFILL_ENABLED",
+    "class": "behaviour",
+    "reason": "toggle: dense embedding backfill (read in src/index.ts)"
+  },
+  {
+    "name": "DISCOVERY_ENABLED",
+    "class": "behaviour",
+    "reason": "toggle: discovery registration (read in src/config.ts)"
+  },
+  {
+    "name": "DISCOVERY_HEARTBEAT_INTERVAL_MS",
+    "class": "behaviour",
+    "reason": "discovery heartbeat cadence (read in src/config.ts)"
+  },
+  {
+    "name": "DISCOVERY_RETRY_ATTEMPTS",
+    "class": "behaviour",
+    "reason": "discovery retry count (read in src/config.ts)"
+  },
+  {
+    "name": "DISCOVERY_RETRY_BACKOFF_MS",
+    "class": "behaviour",
+    "reason": "discovery retry backoff (read in src/config.ts)"
+  },
+  {
+    "name": "DISCOVERY_VESSEL_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: discovery (read in src/config.ts)"
+  },
+  {
+    "name": "DOCKER_CONTAINER",
+    "class": "bootstrap",
+    "reason": "platform fact: detects a docker deployment for registration (read in src/services/discovery-client.ts)"
+  },
+  {
+    "name": "EMBEDDING_CACHE_CAPACITY",
+    "class": "behaviour",
+    "reason": "embedding cache capacity (read in src/services/embedding.ts)"
+  },
+  {
+    "name": "EMBEDDING_MODEL_DIR",
+    "class": "bootstrap",
+    "reason": "filesystem root/path: local embedding model dir (read in src/services/embedding.ts)"
+  },
+  {
+    "name": "ENVIRONMENT",
+    "class": "bootstrap",
+    "reason": "identity/node name: environment label in config (read in src/config.ts)"
+  },
+  {
+    "name": "HOST",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: bind host (read in src/config.ts)"
+  },
+  {
+    "name": "HOSTNAME",
+    "class": "bootstrap",
+    "reason": "identity/node name: host name for vessel id (read in src/config.ts, src/services/discovery-client.ts)"
+  },
+  {
+    "name": "IDENTITY_VESSEL_URL",
+    "class": "bootstrap",
+    "reason": "peer endpoint URL: identity-vessel (credential validator) (read in src/config.ts)"
+  },
+  {
+    "name": "KUBERNETES_SERVICE_HOST",
+    "class": "bootstrap",
+    "reason": "platform fact set by Kubernetes: detects the deployment environment for registration (read in src/services/discovery-client.ts)"
+  },
+  {
+    "name": "LOG_FORMAT",
+    "class": "bootstrap",
+    "reason": "log format (text/json) (read in src/config.ts, src/utils/logger.ts)"
+  },
+  {
+    "name": "LOG_LEVEL",
+    "class": "bootstrap",
+    "reason": "log level (read in src/config.ts, src/utils/logger.ts)"
+  },
+  {
+    "name": "METABOB_API_KEY",
+    "class": "bootstrap",
+    "reason": "credential/secret: service-to-service API key (read in src/config.ts, src/lifecycle/bus.ts)"
+  },
+  {
+    "name": "NODE_ENV",
+    "class": "bootstrap",
+    "reason": "test-only flag: lets tests run without a namespace (read in src/config.ts)"
+  },
+  {
+    "name": "OBSERVER_ENABLED",
+    "class": "behaviour",
+    "reason": "toggle: observer (read in src/config.ts)"
+  },
+  {
+    "name": "OBSERVER_RECONNECT_INITIAL_MS",
+    "class": "behaviour",
+    "reason": "observer reconnect backoff start (read in src/config.ts)"
+  },
+  {
+    "name": "OBSERVER_RECONNECT_MAX_MS",
+    "class": "behaviour",
+    "reason": "observer reconnect backoff cap (read in src/config.ts)"
+  },
+  {
+    "name": "POD_NAME",
+    "class": "bootstrap",
+    "reason": "identity/node name: pod name for vessel id (read in src/config.ts)"
+  },
+  {
+    "name": "PORT",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: listen port (read in src/config.ts)"
+  },
+  {
+    "name": "REDIS_CONCEPT_TTL",
+    "class": "behaviour",
+    "reason": "concept cache TTL (read in src/config.ts)"
+  },
+  {
+    "name": "REDIS_NEIGHBORS_TTL",
+    "class": "behaviour",
+    "reason": "neighbours cache TTL (read in src/config.ts)"
+  },
+  {
+    "name": "REDIS_RESOLUTION_TTL",
+    "class": "behaviour",
+    "reason": "resolution cache TTL (read in src/config.ts)"
+  },
+  {
+    "name": "REDIS_URL",
+    "class": "bootstrap",
+    "reason": "database connection coordinate: Redis URL (read in src/config.ts)"
+  },
+  {
+    "name": "REQUIRE_AUTH",
+    "class": "behaviour",
+    "reason": "toggle: require auth (read in src/config.ts)"
+  },
+  {
+    "name": "SERVICE_NAME",
+    "class": "bootstrap",
+    "reason": "identity/node name: service name for discovery (read in src/routes/impulses.ts, src/services/discovery-client.ts)"
+  },
+  {
+    "name": "SURREALDB_DATABASE",
+    "class": "bootstrap",
+    "reason": "database connection coordinate: SurrealDB database (read in src/config.ts)"
+  },
+  {
+    "name": "SURREALDB_NAMESPACE",
+    "class": "bootstrap",
+    "reason": "database connection coordinate: SurrealDB namespace (read in src/config.ts, src/routes/impulses.ts, src/services/discovery-client.ts)"
+  },
+  {
+    "name": "SURREALDB_PASSWORD",
+    "class": "bootstrap",
+    "reason": "credential/secret: SurrealDB password (read in src/config.ts)"
+  },
+  {
+    "name": "SURREALDB_URL",
+    "class": "bootstrap",
+    "reason": "database connection coordinate: SurrealDB URL (read in src/config.ts)"
+  },
+  {
+    "name": "SURREALDB_USERNAME",
+    "class": "bootstrap",
+    "reason": "credential/secret: SurrealDB user (read in src/config.ts)"
+  },
+  {
+    "name": "SURREAL_MAX_CONCURRENT_QUERIES",
+    "class": "behaviour",
+    "reason": "DB query concurrency cap (read in src/db/surreal.ts)"
+  },
+  {
+    "name": "UPKEEP_BATCH_SIZE",
+    "class": "behaviour",
+    "reason": "upkeep batch size (read in src/config.ts)"
+  },
+  {
+    "name": "UPKEEP_ENABLED",
+    "class": "behaviour",
+    "reason": "toggle: upkeep job (read in src/config.ts)"
+  },
+  {
+    "name": "UPKEEP_INTERVAL_MS",
+    "class": "behaviour",
+    "reason": "upkeep cadence (read in src/config.ts)"
+  },
+  {
+    "name": "VESSEL_ENDPOINT",
+    "class": "bootstrap",
+    "reason": "own endpoint/bind address: advertised endpoint override (read in src/routes/impulses.ts, src/services/discovery-client.ts)"
+  },
+  {
+    "name": "VESSEL_ID",
+    "class": "bootstrap",
+    "reason": "identity/node name: vessel id (read in src/config.ts, src/lifecycle/bus.ts)"
+  },
+  {
+    "name": "VESSEL_NAME",
+    "class": "bootstrap",
+    "reason": "identity/node name: vessel name for discovery (read in src/config.ts)"
+  }
+]
