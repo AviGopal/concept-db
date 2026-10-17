@@ -181,8 +181,7 @@ describe('triggers', () => {
     // condition appears once there, and the hydrate is where it is applied
     expect(c.match(/\$\{orgCondition\}/g)?.length).toBe(1);
     expect(c).toContain('type::thing("concept", $i)) WHERE ${orgCondition}${scalarWhere}`;');
-    // the dense leg gets the search's own tenant condition (and, since 760f303, the widening's deadline)
-    expect(c).toContain('searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken, orgCondition, Date.now() + DENSE_BUDGET_MS)');
+    expect(c).toContain('searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken, orgCondition)');
     expect(c).toContain('void writeConceptEmbeddings(String(updated.id).replace(/^concept:/, \'\'), updated.content, updated.summary);');
     const sql = readFileSync(join(import.meta.dir, '..', '..', 'sql', 'core', '008-permissions-token-org.surql'), 'utf-8');
     expect(sql).toContain("(scope = 'global' AND public = true)");
