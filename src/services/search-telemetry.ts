@@ -31,6 +31,11 @@ export interface DenseLegSnapshot {
   dense_widen_skipped_budget: number;
   /** widened passes that ran past their estimate and were cut one pass1 before the deadline (best-so-far returned) */
   dense_widen_cut_deadline: number;
+  /** shape_description-filtered searches scored EXACTLY over the subset (no KNN, no widening, no budget race); kept out
+   *  of `searches` so dense_budget_miss_rate stays the KNN path's own rate */
+  dense_exact_shape_searches: number;
+  /** of those, the ones that returned no candidate (no described shape visible to the caller, or no query embedding) */
+  dense_exact_shape_empty: number;
 }
 
 /**
@@ -47,12 +52,15 @@ export class DenseLegStats {
   private widenPasses = 0;
   private widenSkipped = 0;
   private widenCut = 0;
+  private exactShape = 0;
+  private exactShapeEmpty = 0;
 
   recordHit(): void { this.searches++; this.hits++; }
 
   recordWidenPass(): void { this.widenPasses++; }
   recordWidenSkippedForBudget(): void { this.widenSkipped++; }
   recordWidenCutAtDeadline(): void { this.widenCut++; }
+  recordExactShape(opts: { hits: number }): void { this.exactShape++; if (opts.hits === 0) this.exactShapeEmpty++; }
 
   recordEmpty(opts: { timedOut: boolean }): void {
     this.searches++;
@@ -71,6 +79,8 @@ export class DenseLegStats {
       dense_widen_passes: this.widenPasses,
       dense_widen_skipped_budget: this.widenSkipped,
       dense_widen_cut_deadline: this.widenCut,
+      dense_exact_shape_searches: this.exactShape,
+      dense_exact_shape_empty: this.exactShapeEmpty,
     };
   }
 }

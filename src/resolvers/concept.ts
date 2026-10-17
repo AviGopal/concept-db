@@ -15,6 +15,7 @@ import { embeddingService } from '../services/embedding';
 import { mergeByRRF } from '../utils/rrf';
 import { normalizeConceptId } from '../services/passive-usage';
 import { searchTermLadder } from './search-terms';
+import { SHAPE_CONCEPT_SHAPE } from '../upkeep/shape-index';
 import type {
   Concept,
   CreateConceptRequest,
@@ -627,7 +628,18 @@ export async function searchConcepts(
   const lexicalHits = contentRaw.length + summaryRaw.length;
   lexicalLegStats.record({ hits: lexicalHits, errored: ftsErrored });
   let denseResults: Concept[] = [];
-  if (lexicalHits > 0) {
+  // A SHAPE-DESCRIPTION RECALL IS SCORED EXACTLY, AND ALWAYS RUNS. The shape index is a few hundred rows in a table of
+  // tens of thousands, so the KNN leg's global top K rarely holds one, its post-filter kept none, and B''s widening was
+  // skipped for budget on every such search (live 2026-10-17: 1487/1487; ~62% of goal-host shape recalls returned no
+  // candidate). For this shape only, the dense leg scores every row of the filtered subset (exactShapeRecallWith) with
+  // the same tenant/trust/scalar filter, runs even when the lexical ladder matched (a generic lexical hit used to skip
+  // it), is not raced against DENSE_BUDGET_MS, and is RRF-merged with the lexical results below. Counted apart from the
+  // KNN leg (dense_exact_shape_searches), so dense_budget_miss_rate stays the KNN path's own rate. Every other search
+  // takes the path below unchanged.
+  if (request.shape === SHAPE_CONCEPT_SHAPE) {
+    denseResults = await searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken, orgCondition, undefined, true);
+    denseLegStats.recordExactShape({ hits: denseResults.length });
+  } else if (lexicalHits > 0) {
     logger.info('[searchConcepts] lexical ladder matched — skipping the dense leg entirely', {
       lexical_hits: lexicalHits,
     });
@@ -781,6 +793,7 @@ async function searchConceptsByDense(
   jwtToken?: string,
   orgCondition: string = 'org_id = $org_id',
   deadlineMs?: number,
+  exactShape = false,
 ): Promise<Concept[]> {
   if (!embeddingService.isReady()) return [];
 
@@ -867,7 +880,9 @@ async function searchConceptsByDense(
     const runQuery = <T>(sql: string, params: Record<string, unknown>): Promise<T[]> =>
       jwtToken ? queryWithAuth<T>(jwtToken, sql, params) : surrealDB.query<T>(sql, params);
 
-    const summaryRows = (await denseRecallWith(runQuery, hydrateSql, denseParams, limit, deadlineMs)) as ConceptRow[];
+    const summaryRows = (exactShape
+      ? await exactShapeRecallWith(runQuery, filterStr, hydrateSql, denseParams, limit)
+      : await denseRecallWith(runQuery, hydrateSql, denseParams, limit, deadlineMs)) as ConceptRow[];
     const contentRows: ConceptRow[] = [];
 
     // KNN returns cosine DISTANCE (lower = closer); convert to a similarity
@@ -904,6 +919,67 @@ async function searchConceptsByDense(
     });
     return [];
   }
+}
+
+/** Cosine similarity of a stored embedding to the query; null when the row has no comparable vector. */
+function cosineTo(query: number[], queryNorm: number, v: unknown): number | null {
+  if (!Array.isArray(v) || v.length !== query.length || queryNorm === 0) return null;
+  let dot = 0;
+  let nn = 0;
+  for (let i = 0; i < v.length; i++) {
+    const x = Number(v[i]);
+    dot += x * (query[i] as number);
+    nn += x * x;
+  }
+  if (!(nn > 0) || !Number.isFinite(dot)) return null;
+  return dot / (Math.sqrt(nn) * queryNorm);
+}
+
+/**
+ * THE EXACT RECALL for a shape-description search: every row of the filtered subset is scored, so a described shape is
+ * never post-filtered out of a global top K. The subset is selected with the dense leg's own filter (`filterStr`: the
+ * search's tenant/trust condition plus its scalar conditions, `shape = $shape` among them) — nothing is rebuilt, so
+ * tenant isolation and the shared-scope trust rule are exactly the KNN leg's. A row's similarity is the better of its
+ * content and summary cosine, as the KNN leg keeps the smaller distance across the two fields; `_dense_dist` is
+ * 1 - similarity (the KNN's cosine distance). Top `limit`, ties broken by id, hydrated with the KNN leg's hydrate.
+ */
+export async function exactShapeRecallWith(
+  runQuery: DenseQuery,
+  filterStr: string,
+  hydrateSql: string,
+  denseParams: Record<string, unknown> & { query_vec: number[] },
+  limit: number,
+): Promise<Array<Concept & { _dense_dist?: number }>> {
+  type ConceptRow = Concept & { _dense_dist?: number };
+  type VecRow = { id: unknown; content_embedding?: unknown; summary_embedding?: unknown };
+  const t0 = Date.now();
+  const q = denseParams.query_vec;
+  const qNorm = Math.sqrt(q.reduce((a, x) => a + x * x, 0));
+  // THE SHAPE FILTER INSIDE, THE TENANT/TRUST FILTER OUTSIDE. With the OR'd shared-scope condition beside it, 2.3.10's
+  // planner iterates the whole table (EXPLAIN on a throwaway 2.3.10: `Iterate Table`), materialising every row's two
+  // vectors with no budget; the inner `shape = $shape` alone iterates idx_concept_shape. The outer WHERE is the leg's
+  // own filterStr, unchanged (its `shape = $shape` is redundant and harmless).
+  const subset = await runQuery<VecRow>(`SELECT id, content_embedding, summary_embedding FROM (SELECT * FROM concept WHERE shape = $shape) WHERE true${filterStr}`, denseParams);
+  const byKey = (a: { key: string; sim: number }, b: { key: string; sim: number }) =>
+    b.sim - a.sim || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+  const scored: Array<{ id: unknown; key: string; sim: number }> = [];
+  for (const r of subset) {
+    const sims = [cosineTo(q, qNorm, r.content_embedding), cosineTo(q, qNorm, r.summary_embedding)].filter((x): x is number => x !== null);
+    if (sims.length > 0) scored.push({ id: r.id, key: String(r.id), sim: Math.max(...sims) });
+  }
+  scored.sort(byKey);
+  const top = scored.slice(0, limit);
+  let rows: ConceptRow[] = [];
+  if (top.length > 0) {
+    rows = await runQuery<ConceptRow>(hydrateSql, { ...denseParams, ids: top.map((t) => t.id) });
+    const simByKey = new Map(top.map((t) => [t.key, t.sim]));
+    for (const row of rows) row._dense_dist = 1 - (simByKey.get(String(row.id)) ?? 0);
+    rows.sort((a, b) => byKey({ key: String(a.id), sim: 1 - (a._dense_dist ?? 1) }, { key: String(b.id), sim: 1 - (b._dense_dist ?? 1) }));
+  }
+  logger.info('[searchConceptsByDense] shape-description recall scored exactly over the subset', {
+    rows_in_subset: subset.length, rows_scored: scored.length, returned: rows.length, top_similarity: top[0]?.sim ?? null, ms: Date.now() - t0,
+  });
+  return rows;
 }
 
 /** A dense-leg query function: the live one is the shared client (or queryWithAuth); a test passes one to its own engine. */
