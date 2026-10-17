@@ -222,6 +222,8 @@ export const SearchConceptsRequestSchema = z.object({
   // concepts AND hand-minted memo/pattern concepts in a single call.
   source_type: z.union([SourceTypeSchema, z.array(SourceTypeSchema)]).optional(),
   min_relevance: z.number().min(0).max(1).optional(),
+  /** Also read the shared scope every org may select (scope 'global' AND public), e.g. the shape index. */
+  include_global: z.boolean().optional(),
   limit: z.number().optional().default(20),
   offset: z.number().optional().default(0),
 });

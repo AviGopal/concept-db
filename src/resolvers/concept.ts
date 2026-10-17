@@ -168,35 +168,42 @@ export async function createConcept(
   });
 
   // Fire-and-forget: generate dense embeddings for the new concept
-  Promise.resolve().then(async () => {
-    if (!embeddingService.isReady()) return;
-    try {
-      const updates: Record<string, unknown> = {};
-      if (request.content) {
-        const vec = await embeddingService.embed(request.content.slice(0, 2000));
-        updates.content_embedding = Array.from(vec);
-      }
-      const summaryText = request.summary || request.content?.slice(0, 200);
-      if (summaryText) {
-        const vec = await embeddingService.embed(summaryText);
-        updates.summary_embedding = Array.from(vec);
-      }
-      if (Object.keys(updates).length === 0) return;
-      const setClause = Object.keys(updates).map((k) => `${k} = $${k}`).join(', ');
-      await surrealDB.query(
-        `UPDATE type::thing("concept", $id) SET ${setClause}`,
-        { id, ...updates }
-      );
-      logger.debug('[embedding] Wrote embeddings for new concept', { id });
-    } catch (err) {
-      logger.warn('[embedding] Failed to write embeddings for new concept', {
-        id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }).catch(() => { /* swallow */ });
+  void writeConceptEmbeddings(id, request.content, request.summary);
 
   return created;
+}
+
+/**
+ * Write a concept's dense embeddings from its content and summary. ONE definition, used at create AND whenever an update
+ * changes the content or summary: an in-place update used to leave the old embeddings, so semantic search kept matching
+ * the text the concept no longer holds. Never throws.
+ */
+export async function writeConceptEmbeddings(id: string, content?: string | null, summary?: string | null): Promise<void> {
+  if (!embeddingService.isReady()) return;
+  try {
+    const updates: Record<string, unknown> = {};
+    if (content) {
+      const vec = await embeddingService.embed(content.slice(0, 2000));
+      updates.content_embedding = Array.from(vec);
+    }
+    const summaryText = summary || content?.slice(0, 200);
+    if (summaryText) {
+      const vec = await embeddingService.embed(summaryText);
+      updates.summary_embedding = Array.from(vec);
+    }
+    if (Object.keys(updates).length === 0) return;
+    const setClause = Object.keys(updates).map((k) => `${k} = $${k}`).join(', ');
+    await surrealDB.query(
+      `UPDATE type::thing("concept", $id) SET ${setClause}`,
+      { id, ...updates }
+    );
+    logger.debug('[embedding] Wrote embeddings for concept', { id });
+  } catch (err) {
+    logger.warn('[embedding] Failed to write embeddings for concept', {
+      id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -321,6 +328,21 @@ const SCALAR_RELEVANCE_FLOOR_RUNGS = [0.9, 0.75, 0.6] as const;
  * When `request.query` is absent the original scalar-filter path is preserved,
  * ordered by relevance DESC, created_at DESC.
  */
+/**
+ * The system org that writes the fleet's shared vocabulary (the upkeep scheduler's org; bootstrap identity, not
+ * behaviour). A search that includes the shared scope trusts global rows ONLY from this org: the concept table lets any
+ * org publish a scope-global public row in its OWN org_id, and recalled content goes into inference prompts, so an
+ * untrusted tenant's global row would steer every org's targets (gap any-org-can-publish-global-public-concepts-readable-by-every-org).
+ */
+export const GLOBAL_TRUSTED_ORG = 'default';
+
+/** The org condition of a search: this org only, or this org plus the shared scope as written by the trusted system org. */
+export function searchOrgCondition(includeGlobal: boolean): string {
+  return includeGlobal
+    ? "(org_id = $org_id OR (scope = 'global' AND public = true AND org_id = $global_trusted_org))"
+    : 'org_id = $org_id';
+}
+
 export async function searchConcepts(
   request: SearchConceptsRequest,
   orgId: string,
@@ -335,6 +357,11 @@ export async function searchConcepts(
     limit,
     offset,
   };
+
+  // The org a search reads. With include_global it also reads the SHARED scope the concept table's PERMISSIONS already
+  // grant every org (scope = 'global' AND public = true): fleet vocabulary such as the shape index, written once.
+  const orgCondition = searchOrgCondition(request.include_global === true);
+  if (request.include_global === true) params.global_trusted_org = GLOBAL_TRUSTED_ORG;
 
   // Scalar filters shared by both code paths
   const scalarConditions: string[] = [];
@@ -396,7 +423,7 @@ export async function searchConcepts(
     // ExecStartPre schema apply.
     // Gap: concept-min-relevance-search-returns-the-least-relevant-concepts-on-surrealdb-2-3-10.
     const baseConditions = [
-      'org_id = $org_id',
+      orgCondition,
       ...scalarConditions.filter((c) => c !== 'relevance >= $min_relevance'),
     ];
     const minRelevance = request.min_relevance;
@@ -481,7 +508,7 @@ export async function searchConcepts(
   const contentSql = `
     SELECT *, search::score(0) AS fts_score OMIT content_embedding, summary_embedding
     FROM (SELECT id, search::score(0) AS s FROM concept WHERE content @0@ '__FTS_TERM__' ORDER BY s DESC LIMIT $fetch_limit).map(|$r| type::thing("concept", $r.id))
-    WHERE content @0@ '__FTS_TERM__' AND org_id = $org_id${scalarWhere}
+    WHERE content @0@ '__FTS_TERM__' AND ${orgCondition}${scalarWhere}
     ORDER BY fts_score DESC
     LIMIT $limit
     START $offset
@@ -490,7 +517,7 @@ export async function searchConcepts(
   const summarySql = `
     SELECT *, search::score(0) AS fts_score OMIT content_embedding, summary_embedding
     FROM (SELECT id, search::score(0) AS s FROM concept WHERE summary @0@ '__FTS_TERM__' ORDER BY s DESC LIMIT $fetch_limit).map(|$r| type::thing("concept", $r.id))
-    WHERE summary @0@ '__FTS_TERM__' AND org_id = $org_id${scalarWhere}
+    WHERE summary @0@ '__FTS_TERM__' AND ${orgCondition}${scalarWhere}
     ORDER BY fts_score DESC
     LIMIT $limit
     START $offset
@@ -596,7 +623,7 @@ export async function searchConcepts(
       lexical_hits: lexicalHits,
     });
   } else {
-    densePromise = searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken);
+    densePromise = searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken, orgCondition);
     // TIMED-OUT vs GENUINELY-EMPTY. Both outcomes land in `denseResults.length === 0`, so
     // the log below could not tell starvation from "no matches" — and a counter over that
     // branch alone would report starvation on a query that simply had none. This flag is
@@ -742,7 +769,8 @@ async function searchConceptsByDense(
   scalarConditions: string[],
   scalarParams: Record<string, unknown>,
   limit: number,
-  jwtToken?: string
+  jwtToken?: string,
+  orgCondition: string = 'org_id = $org_id',
 ): Promise<Concept[]> {
   if (!embeddingService.isReady()) return [];
 
@@ -797,7 +825,7 @@ async function searchConceptsByDense(
     // This is also what the comment above always said the design was ("K is the caller's over-fetch,
     // so post-filtering still leaves ample candidates") — the code just never did it. K is now a
     // real over-fetch so post-filtering still fills the page.
-    const filterConditions = ['org_id = $org_id', ...scalarConditions];
+    const filterConditions = [orgCondition, ...scalarConditions];
     const filterStr = ` AND ${filterConditions.join(' AND ')}`;
     const knnK = Math.max(limit * 4, 32);
     const ef = Math.max(knnK * 2, 64);
@@ -1195,6 +1223,11 @@ export async function updateConcept(
     updates,
     orgId,
   });
+
+  // The embeddings follow the text: a changed content or summary is re-embedded in place (same id, same history).
+  if (updates.content !== undefined || updates.summary !== undefined) {
+    void writeConceptEmbeddings(String(updated.id).replace(/^concept:/, ''), updated.content, updated.summary);
+  }
 
   return updated;
 }

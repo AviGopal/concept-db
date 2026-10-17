@@ -339,7 +339,34 @@ const prunePerExecutionConcepts: UpkeepActivity = {
 /**
  * All upkeep activities
  */
+/**
+ * Keep the shape index in step with discovery's described shapes (shape-index.ts). The BACKSTOP sweep: the execution
+ * observer triggers the same sync on registration and template events. One candidate per run (a constant row), so the
+ * sweep runs even on an empty index.
+ */
+const indexShapeDescriptions: UpkeepActivity = {
+  id: 'index-shape-descriptions',
+  name: 'Index Shape Descriptions',
+  description: 'Index every described shape as a concept so a goal recalls the shapes that could answer it by meaning; retire shapes no longer described; count advertised shapes that have no description',
+  candidateQuery: `SELECT * FROM [{ sweep: true }]`,
+  alpha: 1,
+  beta: 1,
+  async execute(_candidate: unknown, orgId: string): Promise<UpkeepResult> {
+    const { runShapeIndexSync } = await import('./shape-index-live');
+    const r = await runShapeIndexSync(orgId, 'upkeep');
+    return {
+      success: true,
+      message: `shape index: +${r.created.length} reindexed ${r.reindexed.length} retired ${r.retired.length} unchanged ${r.unchanged}; ${r.undescribed.length} advertised shape(s) have no description`,
+      changes: [
+        ...[...r.created, ...r.reindexed].map((n): NonNullable<UpkeepResult['changes']>[number] => ({ type: 'created', entity: 'concept', id: `shape:${n}` })),
+        ...r.retired.map((n): NonNullable<UpkeepResult['changes']>[number] => ({ type: 'deleted', entity: 'concept', id: `shape:${n}` })),
+      ],
+    };
+  },
+};
+
 export const upkeepActivities: UpkeepActivity[] = [
+  indexShapeDescriptions,
   splitLongConcept,
   resolveIsland,
   adjustPriorityRelevance,

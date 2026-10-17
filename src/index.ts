@@ -16,12 +16,16 @@ import { registerLifecycleHooks } from './lifecycle/hooks';
 import { startScheduler, stopScheduler, getSchedulerStatus } from './upkeep/scheduler';
 import { discoveryClient } from './services/discovery-client';
 import { ExecutionObserver } from './services/execution-observer';
+import { debouncedSync } from './upkeep/shape-index';
 import packageJson from '../package.json';
 import { embeddingService } from './services/embedding';
 
 // Passive listener for activity-api execution events. Constructed at module
 // load; lifecycle is driven by startup()/shutdown().
-const executionObserver = new ExecutionObserver();
+// The shape index re-syncs on registration and template events (debounced: a burst of re-registrations is one sync);
+// the upkeep activity index-shape-descriptions is the backstop sweep.
+const shapeIndexOnChange = debouncedSync(async () => { const { runShapeIndexSync } = await import('./upkeep/shape-index-live'); await runShapeIndexSync('default', 'event'); }, 30_000);
+const executionObserver = new ExecutionObserver({ onShapeRegistryChange: () => shapeIndexOnChange() });
 
 // Routes
 import { mcp } from './routes/mcp';

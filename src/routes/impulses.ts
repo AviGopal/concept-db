@@ -501,6 +501,8 @@ async function resolveImpulse(c: Context): Promise<Response> {
                 shape: pointer.shape,
                 source_type: pointer.source_type,
                 min_relevance: pointer.min_relevance,
+                // the shared scope as written by the system org (searchOrgCondition), e.g. the shape index
+                include_global: pointer.include_global === true,
                 limit: pointer.limit ?? 20,
                 offset: pointer.offset ?? 0,
               },

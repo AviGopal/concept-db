@@ -82,6 +82,9 @@ export type ObservedEvent =
 
 export interface ExecutionObserverOptions {
   orgId?: string;
+  /** Called when the set of described shapes may have changed (a vessel registered, left or expired; a template was
+   *  created): the shape index re-syncs (upkeep/shape-index.ts). */
+  onShapeRegistryChange?: (reason: string) => void;
   // Injected for testability. Defaults to the real `recordUsage` resolver.
   recordUsage?: (
     request: RecordUsageRequest,
@@ -193,7 +196,9 @@ export class ExecutionObserver {
     // impulse-relevance POST is best-effort.
     this.orgId = options.orgId ?? 'system';
     this.recordUsageFn = options.recordUsage ?? defaultRecordUsage;
+    this.onShapeRegistryChange = options.onShapeRegistryChange;
   }
+  private onShapeRegistryChange?: (reason: string) => void;
 
   /**
    * Start the observer. Non-blocking: any failure to connect is logged and
@@ -372,6 +377,12 @@ export class ExecutionObserver {
         return;
       case 'tool.call':
         this.handleToolCall(event as ToolCallEvent);
+        return;
+      case 'vessel.registered':
+      case 'vessel.deregistered':
+      case 'vessel.expired':
+      case 'template_created':
+        this.onShapeRegistryChange?.(event.type);
         return;
       default:
         // Other broadcast types (execution_started, template_updated, etc.)
