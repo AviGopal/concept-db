@@ -25,6 +25,12 @@ export interface DenseLegSnapshot {
   dense_budget_misses: number;
   dense_true_empty: number;
   dense_budget_miss_rate: number;
+  /** widened dense passes started (a filtered recall whose first pass kept fewer rows than the page) */
+  dense_widen_passes: number;
+  /** widenings NOT started because pass1_ms x (K_N/K_1) plus one more pass1_ms did not fit the remaining budget */
+  dense_widen_skipped_budget: number;
+  /** widened passes that ran past their estimate and were cut one pass1 before the deadline (best-so-far returned) */
+  dense_widen_cut_deadline: number;
 }
 
 /**
@@ -38,8 +44,15 @@ export class DenseLegStats {
   private hits = 0;
   private misses = 0;
   private trueEmpty = 0;
+  private widenPasses = 0;
+  private widenSkipped = 0;
+  private widenCut = 0;
 
   recordHit(): void { this.searches++; this.hits++; }
+
+  recordWidenPass(): void { this.widenPasses++; }
+  recordWidenSkippedForBudget(): void { this.widenSkipped++; }
+  recordWidenCutAtDeadline(): void { this.widenCut++; }
 
   recordEmpty(opts: { timedOut: boolean }): void {
     this.searches++;
@@ -55,6 +68,9 @@ export class DenseLegStats {
       dense_true_empty: this.trueEmpty,
       // Never NaN: a health field that can be NaN is a field nothing can alarm on.
       dense_budget_miss_rate: this.searches === 0 ? 0 : this.misses / this.searches,
+      dense_widen_passes: this.widenPasses,
+      dense_widen_skipped_budget: this.widenSkipped,
+      dense_widen_cut_deadline: this.widenCut,
     };
   }
 }

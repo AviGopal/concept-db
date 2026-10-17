@@ -632,7 +632,7 @@ export async function searchConcepts(
       lexical_hits: lexicalHits,
     });
   } else {
-    densePromise = searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken, orgCondition);
+    densePromise = searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken, orgCondition, Date.now() + DENSE_BUDGET_MS);
     // TIMED-OUT vs GENUINELY-EMPTY. Both outcomes land in `denseResults.length === 0`, so
     // the log below could not tell starvation from "no matches" — and a counter over that
     // branch alone would report starvation on a query that simply had none. This flag is
@@ -780,6 +780,7 @@ async function searchConceptsByDense(
   limit: number,
   jwtToken?: string,
   orgCondition: string = 'org_id = $org_id',
+  deadlineMs?: number,
 ): Promise<Concept[]> {
   if (!embeddingService.isReady()) return [];
 
@@ -836,13 +837,8 @@ async function searchConceptsByDense(
     // real over-fetch so post-filtering still fills the page.
     const filterConditions = [orgCondition, ...scalarConditions];
     const filterStr = ` AND ${filterConditions.join(' AND ')}`;
-    const knnK = Math.max(limit * 4, 32);
-    const ef = Math.max(knnK * 2, 64);
     const denseParams = { ...scalarParams, query_vec: queryVecArr };
 
-    // Stage 1 — pure KNN, no scalar conditions, so the HNSW index is used.
-    const knnSql = (field: string) =>
-      `SELECT id, vector::distance::knn() AS _dense_dist FROM concept WHERE ${field} <|${knnK},${ef}|> $query_vec`;
     // Stage 2 — hydrate and filter the candidate set (small, so this is index-irrelevant).
     // HYDRATE BY RECORD ID, NOT BY THE `id` STRING FIELD.
     //
@@ -871,30 +867,8 @@ async function searchConceptsByDense(
     const runQuery = <T>(sql: string, params: Record<string, unknown>): Promise<T[]> =>
       jwtToken ? queryWithAuth<T>(jwtToken, sql, params) : surrealDB.query<T>(sql, params);
 
-    const [summaryKnn, contentKnn] = await Promise.all([
-      runQuery<{ id: unknown; _dense_dist?: number }>(knnSql('summary_embedding'), denseParams),
-      runQuery<{ id: unknown; _dense_dist?: number }>(knnSql('content_embedding'), denseParams),
-    ]);
-
-    // Keep the best (smallest) distance per id across both vector fields before hydrating, so one
-    // row is fetched once even when it ranks in both legs.
-    const distById = new Map<string, number>();
-    for (const r of [...summaryKnn, ...contentKnn]) {
-      const k = String(r.id);
-      const d = r._dense_dist ?? 1;
-      if (!distById.has(k) || d < (distById.get(k) as number)) distById.set(k, d);
-    }
-
-    let summaryRows: ConceptRow[] = [];
-    let contentRows: ConceptRow[] = [];
-    if (distById.size > 0) {
-      const ids = [...new Set([...summaryKnn, ...contentKnn].map((r) => r.id))];
-      const hydrated = await runQuery<ConceptRow>(hydrateSql, { ...denseParams, ids });
-      // Re-attach the distance the KNN computed; stage 2 cannot recompute it.
-      for (const row of hydrated) row._dense_dist = distById.get(String(row.id)) ?? 1;
-      summaryRows = hydrated;
-      contentRows = [];
-    }
+    const summaryRows = (await denseRecallWith(runQuery, hydrateSql, denseParams, limit, deadlineMs)) as ConceptRow[];
+    const contentRows: ConceptRow[] = [];
 
     // KNN returns cosine DISTANCE (lower = closer); convert to a similarity
     // score (higher = better) so the downstream max-merge, sort, and RRF ranking
@@ -930,6 +904,114 @@ async function searchConceptsByDense(
     });
     return [];
   }
+}
+
+/** A dense-leg query function: the live one is the shared client (or queryWithAuth); a test passes one to its own engine. */
+export type DenseQuery = <T>(sql: string, params: Record<string, unknown>) => Promise<T[]>;
+
+/**
+ * THE DENSE RECALL: an unfiltered KNN the HNSW index can serve, then the tenant and scalar filter on that candidate
+ * set (hydrateSql), WIDENED WHILE THE BUDGET ALLOWS. Returns the hydrated, filtered rows with `_dense_dist` attached.
+ *
+ * A FILTER THE GLOBAL TOP-K DOES NOT SATISFY. Stage 1 ranks the WHOLE table, so a recall filtered to a type that is
+ * rare among the nearest neighbours finds no candidate in the top K and returns empty, with no error (95.8% of dense
+ * searches on the live node ended empty). Putting the filter inside the KNN ran ~43x slower on a throwaway 2.3.10, so
+ * instead K grows by the kept fraction just observed (the K that would fill the page at that fraction), and stops when
+ * the page fills, when the KNN returns fewer than K (every row ranked), or when the widening would not grow K.
+ *
+ * TIME-AWARE (the reason e33916f was reverted). That loop checked the deadline only BETWEEN passes: a 60x pass started
+ * with the budget nearly spent, overran the caller's race, and the caller discarded the WHOLE leg, pass 1's hits
+ * included ("few hits, on time" became "none, late": 1 dense hit in 220 searches against 3.9% before). So:
+ * - a pass is STARTED only if its estimate, pass1_ms x (K_N / K_1), plus a margin of one more pass1_ms, fits what is
+ *   left before the deadline, measured at the decision (the embed before pass 1 has already spent part of it);
+ * - a started pass is raced against (deadline - pass1_ms), one pass1 before the caller's own timer, so the leg always
+ *   resolves first; a pass cut there contributes nothing and the best-so-far is returned;
+ * - best-so-far = the rows of the last COMPLETED pass, so a leg whose pass 1 kept hits never returns empty for time.
+ * Pass 1 itself is not raced: it is the unwidened baseline and behaves exactly as before.
+ * No new constant: the deadline is the caller's DENSE_BUDGET_MS (the same value its race waits), the margin is pass1_ms.
+ */
+export async function denseRecallWith(
+  runQuery: DenseQuery,
+  hydrateSql: string,
+  denseParams: Record<string, unknown> & { query_vec: number[] },
+  limit: number,
+  deadlineMs?: number,
+): Promise<Array<Concept & { _dense_dist?: number }>> {
+  type ConceptRow = Concept & { _dense_dist?: number };
+  type KnnRow = { id: unknown; _dense_dist?: number };
+  const k1 = Math.max(limit * 4, 32);
+  // Stage 1 — pure KNN, no scalar conditions, so the HNSW index is used. EF (search breadth) >= K for recall.
+  const knnSql = (field: string, k: number) =>
+    `SELECT id, vector::distance::knn() AS _dense_dist FROM concept WHERE ${field} <|${k},${Math.max(k * 2, 64)}|> $query_vec`;
+
+  const onePass = async (k: number): Promise<{ rows: ConceptRow[]; exhausted: boolean; candidates: number }> => {
+    const [summaryKnn, contentKnn] = await Promise.all([
+      runQuery<KnnRow>(knnSql('summary_embedding', k), denseParams),
+      runQuery<KnnRow>(knnSql('content_embedding', k), denseParams),
+    ]);
+    // Keep the best (smallest) distance per id across both vector fields before hydrating, so one row is fetched
+    // once even when it ranks in both legs.
+    const distById = new Map<string, number>();
+    for (const r of [...summaryKnn, ...contentKnn]) {
+      const key = String(r.id);
+      const d = r._dense_dist ?? 1;
+      if (!distById.has(key) || d < (distById.get(key) as number)) distById.set(key, d);
+    }
+    let rows: ConceptRow[] = [];
+    if (distById.size > 0) {
+      const ids = [...new Set([...summaryKnn, ...contentKnn].map((r) => r.id))];
+      rows = await runQuery<ConceptRow>(hydrateSql, { ...denseParams, ids });
+      // Re-attach the distance the KNN computed; stage 2 cannot recompute it.
+      for (const row of rows) row._dense_dist = distById.get(String(row.id)) ?? 1;
+    }
+    return { rows, exhausted: summaryKnn.length < k && contentKnn.length < k, candidates: distById.size };
+  };
+
+  const t1 = Date.now();
+  let best = await onePass(k1);
+  const pass1Ms = Date.now() - t1;
+  let k = k1;
+  for (let pass = 2; ; pass++) {
+    const kept = best.rows.length;
+    const next = Math.ceil((k * limit) / Math.max(kept, 1));
+    if (kept >= limit || best.exhausted || next <= k || deadlineMs === undefined) break;
+    const estimateMs = pass1Ms * (next / k1);
+    const remainingMs = deadlineMs - Date.now();
+    if (estimateMs + pass1Ms > remainingMs) {
+      denseLegStats.recordWidenSkippedForBudget();
+      logger.info('[searchConceptsByDense] filter kept too few of the top K; the next widening does not fit the budget', {
+        pass, k, kept, next_k: next, pass1_ms: pass1Ms, estimate_ms: Math.round(estimateMs), remaining_ms: remainingMs,
+      });
+      break;
+    }
+    logger.info('[searchConceptsByDense] filter kept too few of the top K; widening K by the kept fraction', {
+      pass, k, candidates: best.candidates, kept, next_k: next, estimate_ms: Math.round(estimateMs), remaining_ms: remainingMs,
+    });
+    denseLegStats.recordWidenPass();
+    // Resolve one pass1 BEFORE the caller's timer (both are set from the same deadline), so the caller never
+    // discards this leg; the timer is cleared when the pass wins.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cut = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), Math.max(deadlineMs - pass1Ms - Date.now(), 0)); });
+    // A widened pass that errors is no worse than one that is late: the best-so-far stands.
+    const attempt = onePass(next).catch((err) => {
+      logger.warn('[searchConceptsByDense] a widened pass failed; returning the best hits so far', {
+        pass, k: next, error: err instanceof Error ? err.message : String(err),
+      });
+      return 'failed' as const;
+    });
+    const widened = await Promise.race([attempt, cut]).finally(() => clearTimeout(timer));
+    if (widened === 'failed') break;
+    if (widened === null) {
+      denseLegStats.recordWidenCutAtDeadline();
+      logger.info('[searchConceptsByDense] a widened pass ran past its estimate; returning the best hits so far', {
+        pass, k: next, kept_so_far: kept, pass1_ms: pass1Ms, estimate_ms: Math.round(estimateMs),
+      });
+      break;
+    }
+    best = widened;
+    k = next;
+  }
+  return best.rows;
 }
 
 /**
