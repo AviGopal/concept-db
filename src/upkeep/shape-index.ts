@@ -53,11 +53,35 @@ export interface ShapeIndexResult {
   unchanged: number;
   /** advertised shapes with no description: unindexable, recorded */
   undescribed: string[];
+  /** indexed rows whose shape name could not be read back from their content (left untouched, never re-created) */
+  unnamed?: number;
 }
 
 /** The indexed content for a shape: its name and description (the name is part of the meaning a goal may carry). */
 export function indexedContent(name: string, description: string): string {
   return `${name}: ${description.trim()}`;
+}
+/** The shape name an indexed concept carries, read back from its content: the single reader of indexedContent's format
+ *  (the name is NOT read from pointer.name: concept is SCHEMAFULL and `pointer` is a plain object, so SurrealDB drops its
+ *  nested fields on write). null when the content is not in that format (counted by the caller, never re-created). */
+export function indexedName(content: string | null | undefined): string | null {
+  if (typeof content !== "string") return null;
+  const i = content.indexOf(": ");
+  if (i <= 0) return null;
+  const name = content.slice(0, i);
+  return /^[A-Za-z0-9_.:@-]+$/.test(name) && !name.includes(": ") ? name : null;
+}
+
+/** The indexed shapes for one org, through the given query function (the live deps pass the shared client).
+ *  The name is read back from the content (indexedName, the single reader of indexedContent's format), not from
+ *  pointer.name, which SCHEMAFULL drops on write. */
+export async function listIndexedWith(query: (sql: string, params: Record<string, unknown>) => Promise<unknown[]>, orgId: string): Promise<IndexedShape[]> {
+  const rows = (await query(
+    // created_at is projected because SurrealDB requires an ORDER BY field in the selection (else: "Missing order idiom").
+    'SELECT meta::id(id) AS id, pointer.name AS name, content, (public = true) AS active, created_at FROM concept WHERE shape = $shape AND org_id = $org_id ORDER BY created_at ASC',
+    { shape: SHAPE_CONCEPT_SHAPE, org_id: orgId },
+  )) as Array<IndexedShape & { created_at?: unknown }>;
+  return rows.map((r) => ({ id: r.id, name: indexedName(r.content) ?? '', content: r.content, active: r.active }));
 }
 
 /**
@@ -72,8 +96,10 @@ export async function syncShapeIndex(orgId: string, deps: ShapeIndexDeps): Promi
   const advertised = await deps.fetchAdvertised(orgId).catch(() => [] as string[]);
   const indexed = await deps.listIndexed(orgId);
   const byName = new Map<string, IndexedShape[]>();
-  for (const c of indexed) byName.set(c.name, [...(byName.get(c.name) ?? []), c]);
-  const out: ShapeIndexResult = { created: [], reindexed: [], retired: [], restored: [], unchanged: 0, undescribed: [] };
+  const out: ShapeIndexResult = { created: [], reindexed: [], retired: [], restored: [], unchanged: 0, undescribed: [], unnamed: 0 };
+  // A row whose name cannot be read back is COUNTED and left alone: never keyed as "missing", so never re-created
+  // (a name that did not round-trip would otherwise re-create its shape on every cycle).
+  for (const c of indexed) { if (!c.name) { out.unnamed!++; continue; } byName.set(c.name, [...(byName.get(c.name) ?? []), c]); }
 
   for (const [name, desc] of described) {
     const want = indexedContent(name, desc);

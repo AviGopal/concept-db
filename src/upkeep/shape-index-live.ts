@@ -7,7 +7,7 @@ import { systemOrgId } from '../services/system-org';
 import { surrealDB } from '../db/surreal';
 import { logger } from '../utils/logger';
 import { createConcept, updateConcept } from '../resolvers/concept';
-import { SHAPE_CONCEPT_SHAPE, syncShapeIndex, type ShapeIndexDeps, type ShapeIndexResult, type IndexedShape } from './shape-index';
+import { SHAPE_CONCEPT_SHAPE, listIndexedWith, syncShapeIndex, type ShapeIndexDeps, type ShapeIndexResult, type IndexedShape } from './shape-index';
 
 const discoveryUrl = () => config.discovery.endpoint.replace(/\/$/, '');
 
@@ -33,10 +33,7 @@ export const liveShapeIndexDeps: ShapeIndexDeps = {
     return raw && typeof raw === 'object' ? Object.keys(raw as object) : [];
   },
   async listIndexed(orgId) {
-    return surrealDB.query<IndexedShape>(
-      'SELECT meta::id(id) AS id, pointer.name AS name, content, (public = true) AS active FROM concept WHERE shape = $shape AND org_id = $org_id ORDER BY created_at ASC',
-      { shape: SHAPE_CONCEPT_SHAPE, org_id: orgId },
-    );
+    return listIndexedWith((sql, params) => surrealDB.query(sql, params), orgId);
   },
   async create(orgId, name, content) {
     // Written ONCE, in the shared scope every org may read (the table's own PERMISSIONS: scope 'global' AND public).
@@ -60,6 +57,6 @@ export async function runShapeIndexSync(trigger: string, deps: ShapeIndexDeps = 
   const orgId = await resolveOrg();
   if (!orgId) { logger.warn('[shape-index] sync skipped: no validated system org to write under', { trigger }); return null; }
   const r = await syncShapeIndex(orgId, deps);
-  logger.info('[shape-index] sync', { org_id: orgId, trigger, created: r.created.length, reindexed: r.reindexed.length, retired: r.retired.length, unchanged: r.unchanged, undescribed: r.undescribed.length, undescribed_shapes: r.undescribed.slice(0, 50) });
+  logger.info('[shape-index] sync', { org_id: orgId, trigger, created: r.created.length, reindexed: r.reindexed.length, retired: r.retired.length, unchanged: r.unchanged, unnamed: r.unnamed ?? 0, undescribed: r.undescribed.length, undescribed_shapes: r.undescribed.slice(0, 50) });
   return r;
 }
