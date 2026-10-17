@@ -59,6 +59,42 @@ export class DenseLegStats {
   }
 }
 
+export interface LexicalLegSnapshot {
+  lexical_searches: number;
+  lexical_hits: number;
+  lexical_empty: number;
+  lexical_errors: number;
+  lexical_empty_rate: number;
+}
+
+/**
+ * Counts lexical (BM25) leg outcomes per search. The lexical leg returned [] for every term for
+ * six weeks (2026-09-02 to 10-17) with no error and no /health field, so its emptiness was
+ * invisible; an all-empty leg is now a number a detector can read.
+ */
+export class LexicalLegStats {
+  private searches = 0;
+  private hits = 0;
+  private empty = 0;
+  private errors = 0;
+
+  record(opts: { hits: number; errored: boolean }): void {
+    this.searches++;
+    if (opts.hits > 0) this.hits++; else this.empty++;
+    if (opts.errored) this.errors++;
+  }
+
+  snapshot(): LexicalLegSnapshot {
+    return {
+      lexical_searches: this.searches,
+      lexical_hits: this.hits,
+      lexical_empty: this.empty,
+      lexical_errors: this.errors,
+      lexical_empty_rate: this.searches === 0 ? 0 : this.empty / this.searches,
+    };
+  }
+}
+
 export interface EventLoopLagSnapshot {
   samples: number;
   p50_ms: number;
@@ -108,4 +144,5 @@ export class EventLoopLagSampler {
 
 /** Process-wide singletons — one vessel, one loop, one search path. */
 export const denseLegStats = new DenseLegStats();
+export const lexicalLegStats = new LexicalLegStats();
 export const eventLoopLag = new EventLoopLagSampler();

@@ -2,7 +2,7 @@
  * concept-db: Concept Management Vessel — resolver for the concept graph and prose knowledge
  */
 
-import { denseLegStats, eventLoopLag } from './services/search-telemetry.js';
+import { denseLegStats, eventLoopLag, lexicalLegStats } from './services/search-telemetry.js';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger as honoLogger } from 'hono/logger';
@@ -84,6 +84,7 @@ app.get('/health', async (c) => {
       // signature of ONNX inference blocking the loop — the hypothesis that was
       // unfalsifiable because nothing measured it.
       search: denseLegStats.snapshot(),
+      lexical: lexicalLegStats.snapshot(),
       event_loop_lag: eventLoopLag.snapshot(),
       timestamp: new Date().toISOString(),
     });

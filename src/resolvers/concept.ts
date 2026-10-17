@@ -6,7 +6,7 @@
  */
 
 import { systemOrgId } from '../services/system-org';
-import { denseLegStats } from '../services/search-telemetry.js';
+import { denseLegStats, lexicalLegStats } from '../services/search-telemetry.js';
 import { nanoid } from 'nanoid';
 import { surrealDB, queryWithAuth } from '../db/surreal';
 import { logger } from '../utils/logger';
@@ -495,10 +495,20 @@ export async function searchConcepts(
   //
   //   two-stage (this):                                                  0.825 s   ~8.6x
   //
-  // Stage 1 matches on the FTS index ALONE and takes the top ids. Stage 2 re-applies the
-  // match — over ~20 candidates, so index use is irrelevant there — which is what keeps
-  // `fts_score` available; it is load-bearing downstream, where content and summary hits
-  // are merged with summary weighted 2x, and dropping it would collapse every score to 0.
+  // Stage 1 matches on the FTS index ALONE and takes the top ids WITH their scores. Stage 2
+  // HYDRATES those ids by record id and applies the tenant and scalar filters, as the dense
+  // leg's hydrate does; stage 1's score is re-attached as `fts_score` here, in code. It is
+  // load-bearing downstream, where content and summary hits are merged with summary weighted
+  // 2x, and dropping it would collapse every score to 0.
+  //
+  // STAGE 2 MUST NOT RE-MATCH. It used to re-apply `content @0@ 'term'` and search::score(0)
+  // over the record-id list, and in SurrealDB 2.3.10 a match operator over a record-id list
+  // (no full-text index iterated) evaluates false: the deployed two-stage query returned []
+  // for EVERY term from 2026-09-02, silently (no error, no /health field), so every recall was
+  // dense-only. Reproduced 2026-10-17 on an in-memory 2.3.10 with migration 004: stage 1 alone
+  // found the rows, the id mapping was correct, the two-stage form returned [], and the same
+  // form without the stage-2 match returned the tenant's row. The /health `lexical` counters
+  // below make the leg's emptiness visible.
   //
   // `@0@` rather than `@@`: `search::score(0)` refers to match reference 0, and the bare
   // operator registers no reference. Single statement on purpose — SurrealDBClient.query
@@ -506,37 +516,37 @@ export async function searchConcepts(
   //
   // THE FILTER STAYS IN SQL. It is tenant isolation and the root-credential path has no
   // PERMISSIONS backstop; moving it into application code would be a cross-tenant leak.
-  const contentSql = `
-    SELECT *, search::score(0) AS fts_score OMIT content_embedding, summary_embedding
-    FROM (SELECT id, search::score(0) AS s FROM concept WHERE content @0@ '__FTS_TERM__' ORDER BY s DESC LIMIT $fetch_limit).map(|$r| type::thing("concept", $r.id))
-    WHERE content @0@ '__FTS_TERM__' AND ${orgCondition}${scalarWhere}
-    ORDER BY fts_score DESC
-    LIMIT $limit
-    START $offset
-  `;
-
-  const summarySql = `
-    SELECT *, search::score(0) AS fts_score OMIT content_embedding, summary_embedding
-    FROM (SELECT id, search::score(0) AS s FROM concept WHERE summary @0@ '__FTS_TERM__' ORDER BY s DESC LIMIT $fetch_limit).map(|$r| type::thing("concept", $r.id))
-    WHERE summary @0@ '__FTS_TERM__' AND ${orgCondition}${scalarWhere}
-    ORDER BY fts_score DESC
-    LIMIT $limit
-    START $offset
-  `;
+  const ftsStage1Sql = (field: 'content' | 'summary') =>
+    `SELECT id, search::score(0) AS s FROM concept WHERE ${field} @0@ '${FTS_TERM_PLACEHOLDER}' ORDER BY s DESC LIMIT $fetch_limit`;
+  // The tenant condition is the search's own (searchOrgCondition): with include_global it also admits the trusted shared
+  // scope, exactly as the dense hydrate does; a bare org_id here dropped every trusted global concept from the lexical leg.
+  const ftsHydrateSql = `SELECT * OMIT content_embedding, summary_embedding FROM $ids.map(|$i| type::thing("concept", $i)) WHERE ${orgCondition}${scalarWhere}`;
 
   // Drop the 'query' key — it is now inlined in the SQL literal, not bound.
   const { query: _discardedQuery, ...ftsOnlyParams } = ftsParams as typeof ftsParams & { query?: string };
 
-  const runQuery = (sql: string): Promise<Concept[]> =>
+  let ftsErrored = false;
+  const runFts = <T>(sql: string, extra: Record<string, unknown> = {}): Promise<T[]> =>
     (jwtToken
-      ? queryWithAuth<Concept>(jwtToken, sql, ftsOnlyParams)
-      : surrealDB.query<Concept>(sql, ftsOnlyParams)
+      ? queryWithAuth<T>(jwtToken, sql, { ...ftsOnlyParams, ...extra })
+      : surrealDB.query<T>(sql, { ...ftsOnlyParams, ...extra })
     ).catch((err) => {
+      ftsErrored = true;
       logger.warn('[searchConcepts] BM25 query failed', {
         error: err instanceof Error ? err.message : String(err),
       });
-      return [] as Concept[];
+      return [] as T[];
     });
+  // One field's leg: stage 1 on the index, then the filtered hydrate, scores re-attached, best first.
+  const ftsLeg = async (field: 'content' | 'summary', term: string): Promise<Concept[]> => {
+    const hits = await runFts<{ id: unknown; s?: number }>(ftsStage1Sql(field).split(FTS_TERM_PLACEHOLDER).join(term));
+    if (hits.length === 0) return [];
+    const scoreById = new Map<string, number>();
+    for (const h of hits) scoreById.set(String(h.id), typeof h.s === 'number' ? h.s : 0);
+    const rows = await runFts<Concept & { fts_score?: number }>(ftsHydrateSql, { ids: hits.map((h) => h.id) });
+    for (const r of rows) r.fts_score = scoreById.get(String((r as { id?: unknown }).id)) ?? 0;
+    return rows.sort((a, b) => (b.fts_score ?? 0) - (a.fts_score ?? 0)).slice(0, fetchLimit);
+  };
 
   // PROGRESSIVE RELAXATION over term-sets.
   //
@@ -574,10 +584,7 @@ export async function searchConcepts(
   for (const rung of (ladder.length > 0 ? ladder : [safeQueryTerm])) {
     const esc = rung.replace(/['"\\]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
     if (!esc) continue;
-    [contentRaw, summaryRaw] = await Promise.all([
-      runQuery(contentSql.split(FTS_TERM_PLACEHOLDER).join(esc)),
-      runQuery(summarySql.split(FTS_TERM_PLACEHOLDER).join(esc)),
-    ]);
+    [contentRaw, summaryRaw] = await Promise.all([ftsLeg('content', esc), ftsLeg('summary', esc)]);
     usedRung = esc;
     if (contentRaw.length > 0 || summaryRaw.length > 0) break;
   }
@@ -618,6 +625,7 @@ export async function searchConcepts(
   // an observable fact instead of an inferred one.
   const DENSE_BUDGET_MS = Number(process.env.CONCEPT_DENSE_BUDGET_MS ?? 2000);
   const lexicalHits = contentRaw.length + summaryRaw.length;
+  lexicalLegStats.record({ hits: lexicalHits, errored: ftsErrored });
   let denseResults: Concept[] = [];
   if (lexicalHits > 0) {
     logger.info('[searchConcepts] lexical ladder matched — skipping the dense leg entirely', {

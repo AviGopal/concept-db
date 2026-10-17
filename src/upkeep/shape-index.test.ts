@@ -177,7 +177,10 @@ describe('triggers', () => {
     // the resolve plane forwards it, so a vessel recalls the index through the ordinary {type: "concept"} pointer
     const route = readFileSync(join(import.meta.dir, '..', 'routes', 'impulses.ts'), 'utf-8');
     expect(route).toContain('include_global: pointer.include_global === true,');
-    expect(c.match(/\$\{orgCondition\}/g)?.length).toBe(2);
+    // the lexical leg's two field queries share ONE filtered hydrate (848ce6a: stage 2 no longer re-matches), so the tenant
+    // condition appears once there, and the hydrate is where it is applied
+    expect(c.match(/\$\{orgCondition\}/g)?.length).toBe(1);
+    expect(c).toContain('type::thing("concept", $i)) WHERE ${orgCondition}${scalarWhere}`;');
     expect(c).toContain('searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken, orgCondition)');
     expect(c).toContain('void writeConceptEmbeddings(String(updated.id).replace(/^concept:/, \'\'), updated.content, updated.summary);');
     const sql = readFileSync(join(import.meta.dir, '..', '..', 'sql', 'core', '008-permissions-token-org.surql'), 'utf-8');
