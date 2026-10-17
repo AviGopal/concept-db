@@ -632,7 +632,7 @@ export async function searchConcepts(
       lexical_hits: lexicalHits,
     });
   } else {
-    densePromise = searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken, orgCondition);
+    densePromise = searchConceptsByDense(request.query, orgId, scalarConditions, params, fetchLimit, jwtToken, orgCondition, Date.now() + DENSE_BUDGET_MS);
     // TIMED-OUT vs GENUINELY-EMPTY. Both outcomes land in `denseResults.length === 0`, so
     // the log below could not tell starvation from "no matches" — and a counter over that
     // branch alone would report starvation on a query that simply had none. This flag is
@@ -780,6 +780,7 @@ async function searchConceptsByDense(
   limit: number,
   jwtToken?: string,
   orgCondition: string = 'org_id = $org_id',
+  deadlineMs?: number,
 ): Promise<Concept[]> {
   if (!embeddingService.isReady()) return [];
 
@@ -836,13 +837,12 @@ async function searchConceptsByDense(
     // real over-fetch so post-filtering still fills the page.
     const filterConditions = [orgCondition, ...scalarConditions];
     const filterStr = ` AND ${filterConditions.join(' AND ')}`;
-    const knnK = Math.max(limit * 4, 32);
-    const ef = Math.max(knnK * 2, 64);
+    let knnK = Math.max(limit * 4, 32);
     const denseParams = { ...scalarParams, query_vec: queryVecArr };
 
     // Stage 1 — pure KNN, no scalar conditions, so the HNSW index is used.
-    const knnSql = (field: string) =>
-      `SELECT id, vector::distance::knn() AS _dense_dist FROM concept WHERE ${field} <|${knnK},${ef}|> $query_vec`;
+    const knnSql = (field: string, k: number) =>
+      `SELECT id, vector::distance::knn() AS _dense_dist FROM concept WHERE ${field} <|${k},${Math.max(k * 2, 64)}|> $query_vec`;
     // Stage 2 — hydrate and filter the candidate set (small, so this is index-irrelevant).
     // HYDRATE BY RECORD ID, NOT BY THE `id` STRING FIELD.
     //
@@ -871,30 +871,56 @@ async function searchConceptsByDense(
     const runQuery = <T>(sql: string, params: Record<string, unknown>): Promise<T[]> =>
       jwtToken ? queryWithAuth<T>(jwtToken, sql, params) : surrealDB.query<T>(sql, params);
 
-    const [summaryKnn, contentKnn] = await Promise.all([
-      runQuery<{ id: unknown; _dense_dist?: number }>(knnSql('summary_embedding'), denseParams),
-      runQuery<{ id: unknown; _dense_dist?: number }>(knnSql('content_embedding'), denseParams),
-    ]);
-
-    // Keep the best (smallest) distance per id across both vector fields before hydrating, so one
-    // row is fetched once even when it ranks in both legs.
-    const distById = new Map<string, number>();
-    for (const r of [...summaryKnn, ...contentKnn]) {
-      const k = String(r.id);
-      const d = r._dense_dist ?? 1;
-      if (!distById.has(k) || d < (distById.get(k) as number)) distById.set(k, d);
-    }
-
+    // A FILTER THE GLOBAL TOP-K DOES NOT SATISFY. Stage 1 ranks the WHOLE table, so a filtered recall for a
+    // type that is rare among the nearest neighbours finds no candidate in the top K and returns empty, with
+    // no error: on the live node 95.8% of dense searches ended empty. Reproduced on a throwaway 2.3.10 at
+    // 8,000 rows x 384 dims: top-32-then-filter for a 20-row type returned []. Putting the filter INSIDE the
+    // KNN does find it, and EXPLAIN still names the HNSW index, but it ran ~43x slower (607-642 ms against
+    // 14 ms), which at the live store's size would not fit the dense budget (the 2026-08-30 measurement).
+    // So: when the filtered hydrate keeps fewer rows than the page, widen K by the kept fraction just
+    // observed (the K that would fill the page at that fraction), and stop when the page fills, when the
+    // KNN returns fewer than K (every row ranked), when the widening would not grow K, or at the caller's
+    // dense deadline. No new constant: the bound is the existing dense budget.
+    let summaryKnn: Array<{ id: unknown; _dense_dist?: number }> = [];
+    let contentKnn: Array<{ id: unknown; _dense_dist?: number }> = [];
     let summaryRows: ConceptRow[] = [];
     let contentRows: ConceptRow[] = [];
-    if (distById.size > 0) {
-      const ids = [...new Set([...summaryKnn, ...contentKnn].map((r) => r.id))];
-      const hydrated = await runQuery<ConceptRow>(hydrateSql, { ...denseParams, ids });
-      // Re-attach the distance the KNN computed; stage 2 cannot recompute it.
-      for (const row of hydrated) row._dense_dist = distById.get(String(row.id)) ?? 1;
-      summaryRows = hydrated;
+    let distById = new Map<string, number>();
+    for (let pass = 1; ; pass++) {
+      [summaryKnn, contentKnn] = await Promise.all([
+        runQuery<{ id: unknown; _dense_dist?: number }>(knnSql('summary_embedding', knnK), denseParams),
+        runQuery<{ id: unknown; _dense_dist?: number }>(knnSql('content_embedding', knnK), denseParams),
+      ]);
+
+      // Keep the best (smallest) distance per id across both vector fields before hydrating, so one
+      // row is fetched once even when it ranks in both legs.
+      distById = new Map<string, number>();
+      for (const r of [...summaryKnn, ...contentKnn]) {
+        const k = String(r.id);
+        const d = r._dense_dist ?? 1;
+        if (!distById.has(k) || d < (distById.get(k) as number)) distById.set(k, d);
+      }
+
+      summaryRows = [];
       contentRows = [];
+      if (distById.size > 0) {
+        const ids = [...new Set([...summaryKnn, ...contentKnn].map((r) => r.id))];
+        const hydrated = await runQuery<ConceptRow>(hydrateSql, { ...denseParams, ids });
+        // Re-attach the distance the KNN computed; stage 2 cannot recompute it.
+        for (const row of hydrated) row._dense_dist = distById.get(String(row.id)) ?? 1;
+        summaryRows = hydrated;
+      }
+      const kept = summaryRows.length;
+      const exhausted = summaryKnn.length < knnK && contentKnn.length < knnK;
+      const next = Math.ceil((knnK * limit) / Math.max(kept, 1));
+      if (kept >= limit || exhausted || next <= knnK || deadlineMs === undefined || Date.now() >= deadlineMs) break;
+      logger.info('[searchConceptsByDense] filter kept too few of the top K; widening K by the kept fraction', {
+        pass, k: knnK, candidates: distById.size, kept, next_k: next,
+      });
+      knnK = next;
     }
+    // The deadline is checked between passes, so a widened pass can end past it: count it where /health shows it.
+    if (knnK > Math.max(limit * 4, 32) && deadlineMs !== undefined && Date.now() > deadlineMs) denseLegStats.recordDeadlineOverrun();
 
     // KNN returns cosine DISTANCE (lower = closer); convert to a similarity
     // score (higher = better) so the downstream max-merge, sort, and RRF ranking

@@ -25,6 +25,8 @@ export interface DenseLegSnapshot {
   dense_budget_misses: number;
   dense_true_empty: number;
   dense_budget_miss_rate: number;
+  /** widened dense passes that ended past the caller's deadline (the deadline is checked between passes, so the last one can overrun) */
+  dense_deadline_overruns: number;
 }
 
 /**
@@ -38,8 +40,11 @@ export class DenseLegStats {
   private hits = 0;
   private misses = 0;
   private trueEmpty = 0;
+  private overruns = 0;
 
   recordHit(): void { this.searches++; this.hits++; }
+
+  recordDeadlineOverrun(): void { this.overruns++; }
 
   recordEmpty(opts: { timedOut: boolean }): void {
     this.searches++;
@@ -55,6 +60,7 @@ export class DenseLegStats {
       dense_true_empty: this.trueEmpty,
       // Never NaN: a health field that can be NaN is a field nothing can alarm on.
       dense_budget_miss_rate: this.searches === 0 ? 0 : this.misses / this.searches,
+      dense_deadline_overruns: this.overruns,
     };
   }
 }
