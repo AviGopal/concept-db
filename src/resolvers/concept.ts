@@ -215,10 +215,12 @@ export async function resolveConcept(
   const normalizedId = normalizeConceptId(request.concept_id) ?? request.concept_id;
 
   // Fetch the concept
-  const fetchSql = `SELECT * FROM type::thing("concept", $concept_id)`;
+  // ORG SCOPING ON ID PATHS: an id names a record, not a permission. Every id-addressed read and write here carries
+  // the caller's org, so another org's id resolves as "not found" (existence is not disclosed either).
+  const fetchSql = `SELECT * FROM type::thing("concept", $concept_id) WHERE org_id = $org_id`;
   const concepts = jwtToken
-    ? await queryWithAuth<Concept>(jwtToken, fetchSql, { concept_id: normalizedId })
-    : await surrealDB.query<Concept>(fetchSql, { concept_id: normalizedId });
+    ? await queryWithAuth<Concept>(jwtToken, fetchSql, { concept_id: normalizedId, org_id: orgId })
+    : await surrealDB.query<Concept>(fetchSql, { concept_id: normalizedId, org_id: orgId });
 
   const concept = concepts[0];
   if (!concept) {
@@ -226,16 +228,16 @@ export async function resolveConcept(
   }
 
   // Get neighbor IDs - query concept_edge table directly
-  const outgoingSql = `SELECT to_concept FROM concept_edge WHERE from_concept = type::thing("concept", $concept_id)`;
-  const incomingSql = `SELECT from_concept FROM concept_edge WHERE to_concept = type::thing("concept", $concept_id)`;
+  const outgoingSql = `SELECT to_concept FROM concept_edge WHERE from_concept = type::thing("concept", $concept_id) AND org_id = $org_id`;
+  const incomingSql = `SELECT from_concept FROM concept_edge WHERE to_concept = type::thing("concept", $concept_id) AND org_id = $org_id`;
 
   const [outgoingResults, incomingResults] = await Promise.all([
     jwtToken
-      ? queryWithAuth<{ to_concept: string }>(jwtToken, outgoingSql, { concept_id: normalizedId })
-      : surrealDB.query<{ to_concept: string }>(outgoingSql, { concept_id: normalizedId }),
+      ? queryWithAuth<{ to_concept: string }>(jwtToken, outgoingSql, { concept_id: normalizedId, org_id: orgId })
+      : surrealDB.query<{ to_concept: string }>(outgoingSql, { concept_id: normalizedId, org_id: orgId }),
     jwtToken
-      ? queryWithAuth<{ from_concept: string }>(jwtToken, incomingSql, { concept_id: normalizedId })
-      : surrealDB.query<{ from_concept: string }>(incomingSql, { concept_id: normalizedId }),
+      ? queryWithAuth<{ from_concept: string }>(jwtToken, incomingSql, { concept_id: normalizedId, org_id: orgId })
+      : surrealDB.query<{ from_concept: string }>(incomingSql, { concept_id: normalizedId, org_id: orgId }),
   ]);
 
   const neighborIds = [
@@ -257,16 +259,19 @@ export async function resolveConcept(
     UPDATE type::thing("concept", $concept_id) SET
       resolution_snapshot = $snapshot,
       times_loaded = times_loaded + 1
+    WHERE org_id = $org_id
   `;
 
   const updateResults = jwtToken
     ? await queryWithAuth<Concept>(jwtToken, updateSql, {
         concept_id: normalizedId,
         snapshot: resolutionSnapshot,
+        org_id: orgId,
       })
     : await surrealDB.query<Concept>(updateSql, {
         concept_id: normalizedId,
         snapshot: resolutionSnapshot,
+        org_id: orgId,
       });
 
   const resolved = updateResults[0] || { ...concept, resolution_snapshot: resolutionSnapshot };
@@ -287,10 +292,10 @@ export async function resolveConcept(
   // Fetch neighbors if requested
   let neighbors: Concept[] | undefined;
   if (request.include_neighbors && neighborIds.length > 0) {
-    const neighborFetchSql = `SELECT * FROM concept WHERE id IN $ids`;
+    const neighborFetchSql = `SELECT * FROM concept WHERE id IN $ids AND org_id = $org_id`;
     neighbors = jwtToken
-      ? await queryWithAuth<Concept>(jwtToken, neighborFetchSql, { ids: neighborIds })
-      : await surrealDB.query<Concept>(neighborFetchSql, { ids: neighborIds });
+      ? await queryWithAuth<Concept>(jwtToken, neighborFetchSql, { ids: neighborIds, org_id: orgId })
+      : await surrealDB.query<Concept>(neighborFetchSql, { ids: neighborIds, org_id: orgId });
   }
 
   return { concept: resolved, neighbors };
@@ -996,10 +1001,11 @@ export async function getConceptById(
   // Normalize at the resolver boundary — accept any of `X`, `concept_X`,
   // `concept:concept_X`, `concept:⟨concept_X⟩`. See normalizeConceptId.
   const id = normalizeConceptId(conceptId) ?? conceptId;
-  const sql = `SELECT * FROM type::thing("concept", $concept_id)`;
+  // org-scoped like every id path (see resolveConcept): another org's id is "not found"
+  const sql = `SELECT * FROM type::thing("concept", $concept_id) WHERE org_id = $org_id`;
   const results = jwtToken
-    ? await queryWithAuth<Concept>(jwtToken, sql, { concept_id: id })
-    : await surrealDB.query<Concept>(sql, { concept_id: id });
+    ? await queryWithAuth<Concept>(jwtToken, sql, { concept_id: id, org_id: orgId })
+    : await surrealDB.query<Concept>(sql, { concept_id: id, org_id: orgId });
 
   return results[0] || null;
 }
@@ -1141,7 +1147,8 @@ export async function updateConcept(
   jwtToken?: string
 ): Promise<Concept> {
   const setClauses: string[] = [];
-  const params: Record<string, unknown> = { concept_id: conceptId };
+  // own org only: an update addressed to another org's id changes nothing and reports "not found"
+  const params: Record<string, unknown> = { concept_id: normalizeConceptId(conceptId) ?? conceptId, org_id: orgId };
 
   if (updates.summary !== undefined) {
     setClauses.push('summary = $summary');
@@ -1172,14 +1179,14 @@ export async function updateConcept(
     return existing;
   }
 
-  const sql = `UPDATE type::thing("concept", $concept_id) SET ${setClauses.join(', ')}`;
+  const sql = `UPDATE type::thing("concept", $concept_id) SET ${setClauses.join(', ')} WHERE org_id = $org_id`;
   const results = jwtToken
     ? await queryWithAuth<Concept>(jwtToken, sql, params)
     : await surrealDB.query<Concept>(sql, params);
 
   const updated = results[0];
   if (!updated) {
-    throw new Error(`Failed to update concept: ${conceptId}`);
+    throw new Error(`Concept not found: ${conceptId}`);
   }
 
   // Emit lifecycle hook

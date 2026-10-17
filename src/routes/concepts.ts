@@ -366,7 +366,7 @@ concepts.get('/:id/edges', async (c) => {
   const direction = (c.req.query('direction') || 'both') as 'outgoing' | 'incoming' | 'both';
 
   try {
-    const edges = await getEdgesForConcept(conceptId, direction, undefined, jwtAuth?.jwtToken);
+    const edges = await getEdgesForConcept(conceptId, direction, undefined, jwtAuth?.orgId || 'default', jwtAuth?.jwtToken);
     return c.json({ edges });
   } catch (error) {
     const err = error as Error;
@@ -467,7 +467,7 @@ concepts.get('/:id/usage', async (c) => {
   const limit = c.req.query('limit');
 
   try {
-    const history = await getUsageHistory(conceptId, limit ? parseInt(limit) : undefined, jwtAuth?.jwtToken);
+    const history = await getUsageHistory(conceptId, limit ? parseInt(limit) : undefined, jwtAuth?.jwtToken, jwtAuth?.orgId || 'default');
     return c.json({ usage: history });
   } catch (error) {
     const err = error as Error;
@@ -490,7 +490,7 @@ concepts.get('/:id/stats', async (c) => {
   const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
 
   try {
-    const stats = await getUsageStats(conceptId, jwtAuth?.jwtToken);
+    const stats = await getUsageStats(conceptId, jwtAuth?.jwtToken, jwtAuth?.orgId || 'default');
     return c.json(stats);
   } catch (error) {
     const err = error as Error;
@@ -519,7 +519,8 @@ concepts.get('/:id/sequence', async (c) => {
       conceptId,
       direction,
       limit ? parseInt(limit) : undefined,
-      jwtAuth?.jwtToken
+      jwtAuth?.jwtToken,
+      jwtAuth?.orgId || 'default',
     );
     return c.json({ sequence: neighbors });
   } catch (error) {

@@ -83,6 +83,9 @@ function conceptRow(id: string) {
 
 function respond(sql: string, params: Record<string, any> = {}): unknown[] {
   const s = sql.replace(/\s+/g, ' ').trim();
+  // the endpoint-ownership read every edge write now makes (org scoping on id paths): this fixture's endpoints are the
+  // caller's own concepts
+  if (/^SELECT VALUE meta::id\(id\) FROM \[type::thing\("concept"/.test(s)) return [params.from_id, params.to_id];
   if (/^CREATE type::thing\("concept_usage"/.test(s)) return [{ id: `concept_usage:${params.id}`, ...params }];
   if (/^CREATE type::thing\("concept"/.test(s)) return [conceptRow(params.id)];
   if (/^INSERT INTO concept_edge/.test(s)) return [{ id: `concept_edge:${params.id}`, ...params }];

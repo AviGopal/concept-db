@@ -132,6 +132,10 @@ function installPipelineSpy(
       const sql = args[0];
       const params = args[1] || {};
 
+      // the endpoint-ownership read every edge write now makes (org scoping on id paths): this fixture's endpoints are
+      // the caller's own concepts
+      if (/^\s*SELECT\s+VALUE\s+meta::id\(id\)\s+FROM\s+\[type::thing\("concept"/i.test(sql)) return [params.from_id, params.to_id] as never[];
+
       // 1. upsertBySignature lookup: SELECT id FROM concept WHERE source_type=... AND pointer.type=... AND shape=... AND org_id=...
       if (/^\s*SELECT\s+id\s+FROM\s+concept\b/i.test(sql)) {
         const pt = params.pointer_type as string;

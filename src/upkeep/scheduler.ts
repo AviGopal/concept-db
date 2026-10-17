@@ -78,9 +78,10 @@ export async function runUpkeepCycle(): Promise<UpkeepRun[]> {
       const startedAt = new Date().toISOString();
 
       try {
-        // Execute the activity
-        // Use 'default' org for upkeep activities (system-level)
-        const result = await activity.execute(candidate, 'default');
+        // Execute the activity in the CANDIDATE'S OWN org: id paths are org-scoped, so system maintenance acts on a
+        // concept as its owner (a candidate without an org falls back to 'default', as before)
+        const candOrg = (candidate as { org_id?: unknown })?.org_id;
+        const result = await activity.execute(candidate, typeof candOrg === 'string' && candOrg ? candOrg : 'default');
 
         const run: UpkeepRun = {
           id: runId,

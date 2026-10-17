@@ -106,14 +106,16 @@ const resolveIsland: UpkeepActivity = {
     const searchSql = `
       SELECT *, string::similarity::fuzzy(summary, $summary) AS similarity
       FROM concept
-      WHERE id != $concept_id
+      WHERE id != $concept_id AND org_id = $org_id
       ORDER BY similarity DESC
       LIMIT 1
     `;
 
+    // within the concept's own org: an auto-link never joins two orgs' concepts
     const related = await surrealDB.query<Concept & { similarity: number }>(searchSql, {
       concept_id: concept.id,
       summary: concept.summary || '',
+      org_id: orgId,
     });
 
     if (related.length === 0 || related[0].similarity < 0.3) {

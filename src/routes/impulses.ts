@@ -630,7 +630,7 @@ case 'relatedConcepts': {
             400,
           );
         }
-        const stats = await getUsageStats(pointer.concept_id, jwtToken);
+        const stats = await getUsageStats(pointer.concept_id, jwtToken, orgId);
         result = {
           content: stats,
           metadata: {
@@ -653,6 +653,7 @@ case 'relatedConcepts': {
           pointer.direction ?? 'next',
           pointer.limit ?? 5,
           jwtToken,
+          orgId,
         );
         result = {
           content: neighbors,
@@ -1063,7 +1064,7 @@ case 'relatedConcepts': {
           auth_context: jwtAuth ? 'yes' : 'no',
         });
         const deconPointer = pointer as { dry_run?: boolean; min_loads?: number };
-        const deconReport = await decontaminateCredit({ dry_run: deconPointer.dry_run, min_loads: deconPointer.min_loads });
+        const deconReport = await decontaminateCredit({ dry_run: deconPointer.dry_run, min_loads: deconPointer.min_loads }, orgId);
         return c.json({ success: true, shape: 'conceptCreditDecontaminationReport', body: deconReport });
       }
 

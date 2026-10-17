@@ -33,11 +33,11 @@ export async function recordSequence(
     const toId = concept_ids[i + 1];
 
     // Check if edge already exists
-    const exists = await edgeExists(fromId, toId, 'sequence_next', jwtToken);
+    const exists = await edgeExists(fromId, toId, 'sequence_next', jwtToken, orgId);
 
     if (exists) {
       // Increment weight on existing edge (more frequently seen sequences get higher weight)
-      await incrementSequenceWeight(fromId, toId, jwtToken);
+      await incrementSequenceWeight(fromId, toId, orgId, jwtToken);
       edgesSkipped++;
     } else {
       // Create new sequence edge
@@ -74,6 +74,7 @@ export async function recordSequence(
 async function incrementSequenceWeight(
   fromConceptId: string,
   toConceptId: string,
+  orgId: string,
   jwtToken?: string
 ): Promise<void> {
   const sql = `
@@ -83,11 +84,12 @@ async function incrementSequenceWeight(
     WHERE from_concept = type::thing("concept", $from_id)
       AND to_concept = type::thing("concept", $to_id)
       AND edge_type = 'sequence_next'
+      AND org_id = $org_id
   `;
 
   jwtToken
-    ? await queryWithAuth(jwtToken, sql, { from_id: fromConceptId, to_id: toConceptId })
-    : await surrealDB.query(sql, { from_id: fromConceptId, to_id: toConceptId });
+    ? await queryWithAuth(jwtToken, sql, { from_id: fromConceptId, to_id: toConceptId, org_id: orgId })
+    : await surrealDB.query(sql, { from_id: fromConceptId, to_id: toConceptId, org_id: orgId });
 }
 
 /**
@@ -97,7 +99,8 @@ export async function getSequenceNeighbors(
   conceptId: string,
   direction: 'next' | 'prev' | 'both' = 'next',
   limit: number = 5,
-  jwtToken?: string
+  jwtToken?: string,
+  orgId?: string,
 ): Promise<{
   concept_id: string;
   weight: number;
@@ -120,17 +123,17 @@ export async function getSequenceNeighbors(
       weight,
       times_traversed
     FROM concept_edge
-    WHERE ${conditions.join(' OR ')}
+    WHERE (${conditions.join(' OR ')})${orgId === undefined ? '' : ' AND org_id = $org_id'}
     ORDER BY weight DESC, times_traversed DESC
     LIMIT $limit
   `;
 
   const results = jwtToken
     ? await queryWithAuth<{ neighbor_id: string; weight: number; times_traversed: number }>(
-        jwtToken, sql, { concept_id: conceptId, limit }
+        jwtToken, sql, { concept_id: conceptId, limit, org_id: orgId }
       )
     : await surrealDB.query<{ neighbor_id: string; weight: number; times_traversed: number }>(
-        sql, { concept_id: conceptId, limit }
+        sql, { concept_id: conceptId, limit, org_id: orgId }
       );
 
   return results.map(r => ({

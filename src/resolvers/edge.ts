@@ -34,6 +34,21 @@ export interface UpsertEdgeResult {
  * callers that don't want EMA accumulation. Callers that want EMA on
  * repeated observations should use `upsertEdge` instead.
  */
+/**
+ * An edge joins two of the CALLER'S OWN concepts: an endpoint another org owns (or that does not exist) is "not found".
+ * Without this, a caller could hang its own edge (description, weight) off another org's concepts, and the edge
+ * table's unique (from, to, type) index, which carries no org, would collide with the owner's edge.
+ */
+export async function assertOwnEndpoints(fromId: string, toId: string, orgId: string, jwtToken?: string): Promise<void> {
+  const sql = `SELECT VALUE meta::id(id) FROM [type::thing("concept", $from_id), type::thing("concept", $to_id)] WHERE org_id = $org_id`;
+  const params = { from_id: fromId, to_id: toId, org_id: orgId };
+  const rows = jwtToken
+    ? await queryWithAuth<string>(jwtToken, sql, params)
+    : await surrealDB.query<string>(sql, params);
+  const own = new Set((rows ?? []).map(String));
+  for (const id of [fromId, toId]) if (!own.has(id)) throw new Error(`Concept not found: ${id} (an edge's endpoints must be the caller's own concepts)`);
+}
+
 export async function createEdge(
   request: LinkConceptsRequest,
   orgId: string,
@@ -44,6 +59,7 @@ export async function createEdge(
   // to canonical concept records (e.g. "concept__SN64BnJ" not "_SN64BnJ").
   const fromId = normalizeConceptId(request.from_concept_id) ?? request.from_concept_id;
   const toId = normalizeConceptId(request.to_concept_id) ?? request.to_concept_id;
+  await assertOwnEndpoints(fromId, toId, orgId, jwtToken);
 
   const sql = `
     INSERT INTO concept_edge {
@@ -119,6 +135,7 @@ export async function upsertEdge(
   // to canonical concept records (e.g. "concept__SN64BnJ" not "_SN64BnJ").
   const fromId = normalizeConceptId(request.from_concept_id) ?? request.from_concept_id;
   const toId = normalizeConceptId(request.to_concept_id) ?? request.to_concept_id;
+  await assertOwnEndpoints(fromId, toId, orgId, jwtToken);
 
   // Look up existing edge (if any).
   const findSql = `
@@ -126,19 +143,24 @@ export async function upsertEdge(
     WHERE from_concept = type::thing("concept", $from_id)
       AND to_concept = type::thing("concept", $to_id)
       AND edge_type = $edge_type
+      AND org_id = $org_id
     LIMIT 1
   `;
 
+  // org-scoped: an upsert finds and changes only the caller's own edge; another org's edge between the same ids is
+  // invisible here, so the caller creates its own instead of rewriting theirs
   const existing = jwtToken
     ? await queryWithAuth<{ id: string; weight: number }>(jwtToken, findSql, {
         from_id: fromId,
         to_id: toId,
         edge_type: request.edge_type,
+        org_id: orgId,
       })
     : await surrealDB.query<{ id: string; weight: number }>(findSql, {
         from_id: fromId,
         to_id: toId,
         edge_type: request.edge_type,
+        org_id: orgId,
       });
 
   if (existing[0]) {
@@ -157,13 +179,14 @@ export async function upsertEdge(
     const params: Record<string, unknown> = {
       edge_id: edgeRecordId,
       weight: newWeight,
+      org_id: orgId,
     };
     if (request.description !== undefined && request.description !== null) {
       setClauses.push('description = $description');
       params.description = request.description;
     }
 
-    const updateSql = `UPDATE type::thing("concept_edge", $edge_id) SET ${setClauses.join(', ')}`;
+    const updateSql = `UPDATE type::thing("concept_edge", $edge_id) SET ${setClauses.join(', ')} WHERE org_id = $org_id`;
 
     jwtToken
       ? await queryWithAuth(jwtToken, updateSql, params)
@@ -237,11 +260,13 @@ export async function upsertEdge(
 export async function getEdgesForConcept(
   conceptId: string,
   direction: 'outgoing' | 'incoming' | 'both' = 'both',
-  edgeTypes?: EdgeType[],
+  edgeTypes: EdgeType[] | undefined,
+  orgId: string,
   jwtToken?: string
 ): Promise<ConceptEdge[]> {
-  const params: Record<string, unknown> = { concept_id: conceptId };
-  const conditions: string[] = [];
+  // org-scoped: the caller sees only its own org's edges (another org's ids are not listed)
+  const params: Record<string, unknown> = { concept_id: conceptId, org_id: orgId };
+  const conditions: string[] = ['org_id = $org_id'];
 
   if (direction === 'outgoing') {
     conditions.push('from_concept = type::thing("concept", $concept_id)');
@@ -425,13 +450,16 @@ export async function edgeExists(
   fromConceptId: string,
   toConceptId: string,
   edgeType: EdgeType,
-  jwtToken?: string
+  jwtToken?: string,
+  orgId?: string,
 ): Promise<boolean> {
+  // with an org, only that org's edge counts (a sequence recorder never treats another org's edge as its own)
+  const orgClause = orgId === undefined ? '' : ' AND org_id = $org_id';
   const sql = `
     SELECT count() as cnt FROM concept_edge
     WHERE from_concept = type::thing("concept", $from_id)
       AND to_concept = type::thing("concept", $to_id)
-      AND edge_type = $edge_type
+      AND edge_type = $edge_type${orgClause}
     GROUP ALL
   `;
 
@@ -440,11 +468,13 @@ export async function edgeExists(
         from_id: fromConceptId,
         to_id: toConceptId,
         edge_type: edgeType,
+        ...(orgId === undefined ? {} : { org_id: orgId }),
       })
     : await surrealDB.query<{ cnt: number }>(sql, {
         from_id: fromConceptId,
         to_id: toConceptId,
         edge_type: edgeType,
+        ...(orgId === undefined ? {} : { org_id: orgId }),
       });
 
   return (results[0]?.cnt || 0) > 0;

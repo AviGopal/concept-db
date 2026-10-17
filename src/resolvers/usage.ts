@@ -44,9 +44,11 @@ export async function recordUsage(
     throw new Error('unbound template placeholder trace_id — usage row refused (no synthetic credit)');
   }
   const cidCheck = canonical(request.concept_id);
+  // org-scoped: usage (and the relevance it moves) is recorded only against the caller's own concept
+  const existsSql = 'SELECT id FROM concept WHERE id = type::thing("concept", $cid) AND org_id = $org_id LIMIT 1';
   const exists = jwtToken
-    ? await queryWithAuth<{ id: unknown }>(jwtToken, 'SELECT id FROM concept WHERE id = type::thing("concept", $cid) LIMIT 1', { cid: cidCheck })
-    : await surrealDB.query<{ id: unknown }>('SELECT id FROM concept WHERE id = type::thing("concept", $cid) LIMIT 1', { cid: cidCheck });
+    ? await queryWithAuth<{ id: unknown }>(jwtToken, existsSql, { cid: cidCheck, org_id: orgId })
+    : await surrealDB.query<{ id: unknown }>(existsSql, { cid: cidCheck, org_id: orgId });
   if (!Array.isArray(exists) || exists.length === 0) {
     throw new Error(`concept not found: ${cidCheck} — usage row refused`);
   }
@@ -90,7 +92,7 @@ export async function recordUsage(
   }
 
   // Update concept learning metrics
-  await updateConceptMetrics(canonical(request.concept_id), request.outcome, jwtToken);
+  await updateConceptMetrics(canonical(request.concept_id), request.outcome, orgId, jwtToken);
 
   // Forward to activity API for impulse relevance tracking
   await forwardToActivityApi({ ...request, concept_id: canonical(request.concept_id) }, orgId);
@@ -117,16 +119,17 @@ export async function recordUsage(
 // A crash loses at most one window of counts; relevance stays eventually consistent.
 const CONCEPT_METRICS_FLUSH_MS = 60_000;
 type PendingConceptMetrics = { succeeded: number; failed: number; loaded: number };
-// Keyed by auth token ("" = root connection), then concept id.
+// Keyed by auth token ("" = root connection) and org, then concept id.
 const pendingConceptMetrics = new Map<string, Map<string, PendingConceptMetrics>>();
 let conceptMetricsFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function updateConceptMetrics(
   conceptId: string,
   outcome: Outcome,
+  orgId: string,
   jwtToken?: string
 ): Promise<void> {
-  const tokenKey = jwtToken ?? "";
+  const tokenKey = JSON.stringify([jwtToken ?? "", orgId]);
   let byConcept = pendingConceptMetrics.get(tokenKey);
   if (!byConcept) {
     byConcept = new Map<string, PendingConceptMetrics>();
@@ -159,10 +162,12 @@ async function flushConceptMetrics(): Promise<void> {
       times_failed = times_failed + $df,
       times_loaded = times_loaded + $dl,
       relevance = <float>(times_succeeded + 1) / (times_loaded + 2)
+    WHERE org_id = $org_id
   `;
-  for (const [tokenKey, byConcept] of batches) {
+  for (const [batchKey, byConcept] of batches) {
+    const [tokenKey, orgId] = JSON.parse(batchKey) as [string, string];
     for (const [conceptId, p] of byConcept) {
-      const params = { concept_id: conceptId, ds: p.succeeded, df: p.failed, dl: p.loaded };
+      const params = { concept_id: conceptId, ds: p.succeeded, df: p.failed, dl: p.loaded, org_id: orgId };
       try {
         tokenKey
           ? await queryWithAuth(tokenKey, updateSql, params)
@@ -226,19 +231,20 @@ async function forwardToActivityApi(
 export async function getUsageHistory(
   conceptId: string,
   limit: number = 100,
-  jwtToken?: string
+  jwtToken?: string,
+  orgId?: string,
 ): Promise<ConceptUsage[]> {
   const sql = `
     SELECT * FROM concept_usage
-    WHERE concept_id = type::thing("concept", $concept_id)
+    WHERE concept_id = type::thing("concept", $concept_id)${orgId === undefined ? '' : ' AND org_id = $org_id'}
     ORDER BY recorded_at DESC
     LIMIT $limit
   `;
 
   const normalized = canonical(conceptId);
   return jwtToken
-    ? await queryWithAuth<ConceptUsage>(jwtToken, sql, { concept_id: normalized, limit })
-    : await surrealDB.query<ConceptUsage>(sql, { concept_id: normalized, limit });
+    ? await queryWithAuth<ConceptUsage>(jwtToken, sql, { concept_id: normalized, limit, org_id: orgId })
+    : await surrealDB.query<ConceptUsage>(sql, { concept_id: normalized, limit, org_id: orgId });
 }
 
 /**
@@ -246,7 +252,8 @@ export async function getUsageHistory(
  */
 export async function getUsageStats(
   conceptId: string,
-  jwtToken?: string
+  jwtToken?: string,
+  orgId?: string,
 ): Promise<{
   total_uses: number;
   success_rate: number;
@@ -260,17 +267,17 @@ export async function getUsageStats(
       count(outcome = 'failure') as failures,
       count(outcome = 'neutral') as neutrals
     FROM concept_usage
-    WHERE concept_id = type::thing("concept", $concept_id)
+    WHERE concept_id = type::thing("concept", $concept_id)${orgId === undefined ? '' : ' AND org_id = $org_id'}
     GROUP ALL
   `;
 
   const normalized = canonical(conceptId);
   const results = jwtToken
     ? await queryWithAuth<{ total: number; successes: number; failures: number; neutrals: number }>(
-        jwtToken, sql, { concept_id: normalized }
+        jwtToken, sql, { concept_id: normalized, org_id: orgId }
       )
     : await surrealDB.query<{ total: number; successes: number; failures: number; neutrals: number }>(
-        sql, { concept_id: normalized }
+        sql, { concept_id: normalized, org_id: orgId }
       );
 
   const stats = results[0] || { total: 0, successes: 0, failures: 0, neutrals: 0 };

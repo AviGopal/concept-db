@@ -11,6 +11,7 @@ import { config } from './config';
 import { logger } from './utils/logger';
 import { surrealDB } from './db/surreal';
 import { jwtAuthMiddleware } from './middleware/jwtAuth';
+import { authCensusMiddleware, startAuthCensus } from './services/auth-census';
 import { registerLifecycleHooks } from './lifecycle/hooks';
 import { startScheduler, stopScheduler, getSchedulerStatus } from './upkeep/scheduler';
 import { discoveryClient } from './services/discovery-client';
@@ -44,6 +45,9 @@ if (config.logLevel === 'debug') {
 
 // JWT authentication middleware
 app.use('*', jwtAuthMiddleware);
+// Auth census (route pattern x credential type, one line per minute; never an id or a key)
+app.use('*', authCensusMiddleware);
+startAuthCensus();
 
 // Health check
 app.get('/health', async (c) => {

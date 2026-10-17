@@ -21,12 +21,13 @@ function bareId(raw: unknown): string {
   return String(raw ?? '').replace(/^concept:/, '').replace(/[⟨⟩]/g, '');
 }
 
-export async function decontaminateCredit(request: DecontaminateRequest): Promise<Record<string, unknown>> {
+// ORG-SCOPED: the repair examines and rewrites only the caller's org's concepts (it used to reach every org's).
+export async function decontaminateCredit(request: DecontaminateRequest, orgId: string): Promise<Record<string, unknown>> {
   const dryRun = request.dry_run !== false;
   const minLoads = typeof request.min_loads === 'number' ? request.min_loads : 50;
   const candidates = await surrealDB.query<ConceptIdRow>(
-    'SELECT id, times_loaded, times_succeeded FROM concept WHERE times_loaded >= $min LIMIT 500',
-    { min: minLoads },
+    'SELECT id, times_loaded, times_succeeded FROM concept WHERE times_loaded >= $min AND org_id = $org_id LIMIT 500',
+    { min: minLoads, org_id: orgId },
   );
   const repairs: Array<Record<string, unknown>> = [];
   const skipped: Array<Record<string, unknown>> = [];
@@ -54,8 +55,8 @@ export async function decontaminateCredit(request: DecontaminateRequest): Promis
     if (!dryRun) {
       try {
         await surrealDB.query(
-          'UPDATE type::thing("concept", $cid) SET times_loaded = $tl, times_succeeded = $ts, times_failed = $tf, relevance = $rel, created_at = created_at ?? time::now(), updated_at = time::now()',
-          { cid, tl: loaded, ts: succeeded, tf: failed, rel: relevance },
+          'UPDATE type::thing("concept", $cid) SET times_loaded = $tl, times_succeeded = $ts, times_failed = $tf, relevance = $rel, created_at = created_at ?? time::now(), updated_at = time::now() WHERE org_id = $org_id',
+          { cid, tl: loaded, ts: succeeded, tf: failed, rel: relevance, org_id: orgId },
         );
       } catch (err) {
         // Legacy rows can fail SCHEMAFULL whole-record revalidation (e.g. out-of-enum

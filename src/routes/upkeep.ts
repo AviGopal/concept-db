@@ -15,6 +15,7 @@ import {
   stopScheduler,
 } from '../upkeep/scheduler';
 import { upkeepActivities, getUpkeepActivity } from '../upkeep/activities';
+import { redactRunsToOrg } from '../upkeep/run-redaction';
 import { getActivitySummary } from '../upkeep/thompson';
 
 const upkeep = new Hono();
@@ -87,10 +88,13 @@ upkeep.post('/trigger', async (c) => {
   });
 
   try {
-    const runs = await triggerUpkeep();
+    const all = await triggerUpkeep();
+    // the caller sees only its own org's ids among what upkeep changed (see run-redaction.ts)
+    const { runs, withheld } = await redactRunsToOrg(all, jwtAuth?.orgId || 'default');
     return c.json({
       triggered: true,
       runs,
+      changes_withheld: withheld,
     });
   } catch (error) {
     const err = error as Error;
