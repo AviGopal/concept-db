@@ -5,6 +5,7 @@
  * Resolution creates a snapshot capturing the state at resolution time.
  */
 
+import { systemOrgId } from '../services/system-org';
 import { denseLegStats } from '../services/search-telemetry.js';
 import { nanoid } from 'nanoid';
 import { surrealDB, queryWithAuth } from '../db/surreal';
@@ -329,12 +330,11 @@ const SCALAR_RELEVANCE_FLOOR_RUNGS = [0.9, 0.75, 0.6] as const;
  * ordered by relevance DESC, created_at DESC.
  */
 /**
- * The system org that writes the fleet's shared vocabulary (the upkeep scheduler's org; bootstrap identity, not
- * behaviour). A search that includes the shared scope trusts global rows ONLY from this org: the concept table lets any
- * org publish a scope-global public row in its OWN org_id, and recalled content goes into inference prompts, so an
- * untrusted tenant's global row would steer every org's targets (gap any-org-can-publish-global-public-concepts-readable-by-every-org).
+ * A search that includes the shared scope trusts global rows ONLY from the SYSTEM ORG (services/system-org.ts: this
+ * vessel's own key's validated org). Any org can publish a scope-global public row in its own org_id, and recalled
+ * content goes into inference prompts, so an untrusted writer's global row would steer every org's targets (gap
+ * any-org-can-publish-global-public-concepts-readable-by-every-org). With no validated system org, nothing global is read.
  */
-export const GLOBAL_TRUSTED_ORG = 'default';
 
 /** The org condition of a search: this org only, or this org plus the shared scope as written by the trusted system org. */
 export function searchOrgCondition(includeGlobal: boolean): string {
@@ -360,8 +360,9 @@ export async function searchConcepts(
 
   // The org a search reads. With include_global it also reads the SHARED scope the concept table's PERMISSIONS already
   // grant every org (scope = 'global' AND public = true): fleet vocabulary such as the shape index, written once.
-  const orgCondition = searchOrgCondition(request.include_global === true);
-  if (request.include_global === true) params.global_trusted_org = GLOBAL_TRUSTED_ORG;
+  const trustedOrg = request.include_global === true ? await systemOrgId() : null;
+  const orgCondition = searchOrgCondition(trustedOrg !== null);
+  if (trustedOrg !== null) params.global_trusted_org = trustedOrg;
 
   // Scalar filters shared by both code paths
   const scalarConditions: string[] = [];

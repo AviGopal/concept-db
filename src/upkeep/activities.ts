@@ -351,9 +351,11 @@ const indexShapeDescriptions: UpkeepActivity = {
   candidateQuery: `SELECT * FROM [{ sweep: true }]`,
   alpha: 1,
   beta: 1,
-  async execute(_candidate: unknown, orgId: string): Promise<UpkeepResult> {
+  async execute(_candidate: unknown, _orgId: string): Promise<UpkeepResult> {
     const { runShapeIndexSync } = await import('./shape-index-live');
-    const r = await runShapeIndexSync(orgId, 'upkeep');
+    // written under the validated system org, whatever org the scheduler runs this sweep under
+    const r = await runShapeIndexSync('upkeep');
+    if (!r) return { success: false, message: 'shape index not synced: no validated system org to write under' };
     return {
       success: true,
       message: `shape index: +${r.created.length} reindexed ${r.reindexed.length} retired ${r.retired.length} unchanged ${r.unchanged}; ${r.undescribed.length} advertised shape(s) have no description`,

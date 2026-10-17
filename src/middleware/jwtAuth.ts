@@ -81,7 +81,7 @@ export function isPublicPath(path: string, method: string = 'GET'): boolean {
  * Only the configured in-fleet identity endpoint is consulted. If it rejects
  * the key, errors, or is unreachable, the key is not accepted.
  */
-async function validateApiKey(apiKey: string): Promise<JwtAuthContext | null> {
+export async function validateApiKey(apiKey: string): Promise<JwtAuthContext | null> {
   return tryIdentityValidation(apiKey, config.metabob.identityEndpoint);
 }
 

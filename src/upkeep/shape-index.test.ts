@@ -1,7 +1,7 @@
 // THE SHAPE INDEX (I-T structural, RUN 3): every described shape is indexed for recall by meaning, a changed
 // description is re-indexed, a shape no longer described leaves, an advertised shape with no description is COUNTED,
 // and registration/template events trigger the sync (debounced), with the upkeep activity as the backstop.
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { debouncedSync, indexedContent, syncShapeIndex, type IndexedShape, type ShapeIndexDeps } from './shape-index';
@@ -83,24 +83,67 @@ describe('syncShapeIndex', () => {
   });
 });
 
-describe('the shared scope trusts only the system org (security)', () => {
-  it("[MUST-FAIL] a global public row written by ANOTHER org is not admitted: the condition pins the trusted writer", async () => {
-    const { searchOrgCondition, GLOBAL_TRUSTED_ORG } = await import('../resolvers/concept');
-    const cond = searchOrgCondition(true);
-    expect(cond).toContain("org_id = $global_trusted_org");
-    expect(GLOBAL_TRUSTED_ORG).toBe('default');
-    // evaluate the condition over rows the way the database would (org A searching; org B published a global row)
-    const admits = (row: { org_id: string; scope: string; public: boolean }, me: string) =>
-      row.org_id === me || (row.scope === 'global' && row.public === true && row.org_id === GLOBAL_TRUSTED_ORG);
-    expect(admits({ org_id: 'org-b', scope: 'global', public: true }, 'org-a')).toBe(false);
+describe('the shared scope trusts only the validated system org (security)', () => {
+  // the database's reading of the search condition, given the params the search bound
+  const admits = (sql: string, params: Record<string, unknown>, row: { org_id: string; scope: string; public: boolean }) =>
+    row.org_id === params.org_id ||
+    (sql.includes('org_id = $global_trusted_org') && row.scope === 'global' && row.public === true && row.org_id === params.global_trusted_org);
+  const searchBinding = async (validated: string | null) => {
+    const { surrealDB } = await import('../db/surreal');
+    const so = await import('../services/system-org');
+    so.resetSystemOrgCache();
+    await so.systemOrgId(async () => (validated === null ? null : { orgId: validated }), 'own-key');
+    const seen: Array<{ sql: string; params: Record<string, unknown> }> = [];
+    const spy = spyOn(surrealDB, 'query').mockImplementation((async (sql: string, params?: Record<string, unknown>) => { seen.push({ sql, params: params ?? {} }); return []; }) as never);
+    try {
+      const { searchConcepts } = await import('../resolvers/concept');
+      await searchConcepts({ shape: 'shape_description', include_global: true, limit: 5, offset: 0 } as never, 'org-a');
+    } finally { spy.mockRestore(); so.resetSystemOrgCache(); }
+    const q = seen.find((x) => /FROM concept/.test(x.sql))!;
+    return q;
+  };
+
+  it("[MUST-FAIL] an unauthenticated caller's global public row (org 'default') is NOT recalled by another org", async () => {
+    const q = await searchBinding('organizations:substrate');
+    expect(admits(q.sql, q.params, { org_id: 'default', scope: 'global', public: true })).toBe(false);
   });
-  it('[CONTROL] the system org\'s global public row IS admitted for any org; without include_global nothing global is', async () => {
-    const { searchOrgCondition, GLOBAL_TRUSTED_ORG } = await import('../resolvers/concept');
-    const admits = (row: { org_id: string; scope: string; public: boolean }, me: string) =>
-      row.org_id === me || (row.scope === 'global' && row.public === true && row.org_id === GLOBAL_TRUSTED_ORG);
-    expect(admits({ org_id: 'default', scope: 'global', public: true }, 'org-a')).toBe(true);
-    expect(admits({ org_id: 'default', scope: 'global', public: false }, 'org-a')).toBe(false); // retired
-    expect(searchOrgCondition(false)).toBe('org_id = $org_id');
+  it("[MUST-FAIL] another tenant's global public row is not recalled either", async () => {
+    const q = await searchBinding('organizations:substrate');
+    expect(admits(q.sql, q.params, { org_id: 'org-b', scope: 'global', public: true })).toBe(false);
+  });
+  it("[CONTROL] the validated system org's global public row IS recalled; a retired one (public false) is not; the caller's own rows are", async () => {
+    const q = await searchBinding('organizations:substrate');
+    expect(admits(q.sql, q.params, { org_id: 'organizations:substrate', scope: 'global', public: true })).toBe(true);
+    expect(admits(q.sql, q.params, { org_id: 'organizations:substrate', scope: 'global', public: false })).toBe(false);
+    expect(admits(q.sql, q.params, { org_id: 'org-a', scope: 'org', public: false })).toBe(true);
+  });
+  it("[MUST-FAIL] FAIL CLOSED: with no validated system org, nothing global is recalled (not a guessed org)", async () => {
+    const q = await searchBinding(null);
+    expect(q.sql).not.toContain('$global_trusted_org');
+    expect(admits(q.sql, q.params, { org_id: 'organizations:substrate', scope: 'global', public: true })).toBe(false);
+    expect(admits(q.sql, q.params, { org_id: 'org-a', scope: 'org', public: false })).toBe(true);
+  });
+  it("[MUST-FAIL] identity answering 'default' (or empty) never makes it trusted", async () => {
+    const so = await import('../services/system-org');
+    for (const bad of ['default', '']) {
+      so.resetSystemOrgCache();
+      expect(await so.systemOrgId(async () => ({ orgId: bad }), 'own-key')).toBeNull();
+    }
+    so.resetSystemOrgCache();
+    expect(await so.systemOrgId(async () => { throw new Error('identity down'); }, 'own-key')).toBeNull();
+    so.resetSystemOrgCache();
+    expect(await so.systemOrgId(async () => ({ orgId: 'x' }), '')).toBeNull();
+    so.resetSystemOrgCache();
+  });
+  it('[MUST-FAIL] the index is written under the system org, and with none it is not written at all', async () => {
+    const { runShapeIndexSync } = await import('./shape-index-live');
+    const m = memDeps({ a: 'A thing.' }, ['a']);
+    const wrote: string[] = [];
+    const deps = { ...m.deps, create: async (org: string, n: string, c: string) => { wrote.push(org); return m.deps.create(org, n, c); } };
+    expect(await runShapeIndexSync('test', deps, async () => null)).toBeNull();
+    expect(wrote).toEqual([]);
+    await runShapeIndexSync('test', deps, async () => 'organizations:substrate');
+    expect(new Set(wrote)).toEqual(new Set(['organizations:substrate']));
   });
 });
 
@@ -129,8 +172,8 @@ describe('triggers', () => {
     expect(live).toContain('SET public = $active');
     expect(live).not.toContain('deleteConcept');
     const c = readFileSync(join(import.meta.dir, '..', 'resolvers', 'concept.ts'), 'utf-8');
-    expect(c).toContain('const orgCondition = searchOrgCondition(request.include_global === true);');
-    expect(c).toContain('if (request.include_global === true) params.global_trusted_org = GLOBAL_TRUSTED_ORG;');
+    expect(c).toContain('const orgCondition = searchOrgCondition(trustedOrg !== null);');
+    expect(c).toContain('if (trustedOrg !== null) params.global_trusted_org = trustedOrg;');
     // the resolve plane forwards it, so a vessel recalls the index through the ordinary {type: "concept"} pointer
     const route = readFileSync(join(import.meta.dir, '..', 'routes', 'impulses.ts'), 'utf-8');
     expect(route).toContain('include_global: pointer.include_global === true,');

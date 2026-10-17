@@ -3,18 +3,18 @@
  * concept store through concept-db's own create/delete (so embeddings are written exactly as for any concept).
  */
 import { config } from '../config';
+import { systemOrgId } from '../services/system-org';
 import { surrealDB } from '../db/surreal';
 import { logger } from '../utils/logger';
 import { createConcept, updateConcept } from '../resolvers/concept';
 import { SHAPE_CONCEPT_SHAPE, syncShapeIndex, type ShapeIndexDeps, type ShapeIndexResult, type IndexedShape } from './shape-index';
 
 const discoveryUrl = () => config.discovery.endpoint.replace(/\/$/, '');
-// The system org reads the unfiltered registry; any other org reads the shapes its own vessels advertise.
-const orgQuery = (orgId: string) => (orgId === 'default' || orgId === 'system' ? '' : `?org_ids=${encodeURIComponent(orgId)}`);
 
 export const liveShapeIndexDeps: ShapeIndexDeps = {
-  async fetchDescriptions(orgId) {
-    const r = await fetch(`${discoveryUrl()}/registry/shape-descriptions${orgQuery(orgId)}`, { signal: AbortSignal.timeout(10_000) });
+  // the index is fleet vocabulary written once by the system org, so it reads the whole registry
+  async fetchDescriptions(_orgId) {
+    const r = await fetch(`${discoveryUrl()}/registry/shape-descriptions`, { signal: AbortSignal.timeout(10_000) });
     if (!r.ok) throw new Error(`discovery shape-descriptions HTTP ${r.status}`);
     const j = (await r.json()) as { shape_descriptions?: Record<string, unknown> };
     const out: Record<string, string> = {};
@@ -52,8 +52,13 @@ export const liveShapeIndexDeps: ShapeIndexDeps = {
   },
 };
 
-/** One sync for `orgId`, logged with its counts (the undescribed shapes named, so an unindexable shape is visible). */
-export async function runShapeIndexSync(orgId: string, trigger: string, deps: ShapeIndexDeps = liveShapeIndexDeps): Promise<ShapeIndexResult> {
+/**
+ * One sync, written under the SYSTEM ORG (services/system-org.ts), logged with its counts (the undescribed shapes named,
+ * so an unindexable shape is visible). With no validated system org it does not write, and says so (returns null).
+ */
+export async function runShapeIndexSync(trigger: string, deps: ShapeIndexDeps = liveShapeIndexDeps, resolveOrg: () => Promise<string | null> = () => systemOrgId()): Promise<ShapeIndexResult | null> {
+  const orgId = await resolveOrg();
+  if (!orgId) { logger.warn('[shape-index] sync skipped: no validated system org to write under', { trigger }); return null; }
   const r = await syncShapeIndex(orgId, deps);
   logger.info('[shape-index] sync', { org_id: orgId, trigger, created: r.created.length, reindexed: r.reindexed.length, retired: r.retired.length, unchanged: r.unchanged, undescribed: r.undescribed.length, undescribed_shapes: r.undescribed.slice(0, 50) });
   return r;

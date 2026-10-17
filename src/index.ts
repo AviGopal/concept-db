@@ -24,7 +24,7 @@ import { embeddingService } from './services/embedding';
 // load; lifecycle is driven by startup()/shutdown().
 // The shape index re-syncs on registration and template events (debounced: a burst of re-registrations is one sync);
 // the upkeep activity index-shape-descriptions is the backstop sweep.
-const shapeIndexOnChange = debouncedSync(async () => { const { runShapeIndexSync } = await import('./upkeep/shape-index-live'); await runShapeIndexSync('default', 'event'); }, 30_000);
+const shapeIndexOnChange = debouncedSync(async () => { const { runShapeIndexSync } = await import('./upkeep/shape-index-live'); await runShapeIndexSync('event'); }, 30_000);
 const executionObserver = new ExecutionObserver({ onShapeRegistryChange: () => shapeIndexOnChange() });
 
 // Routes
