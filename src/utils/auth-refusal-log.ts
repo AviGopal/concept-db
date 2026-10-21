@@ -13,7 +13,7 @@ import { logger } from './logger';
 
 export const AUTH_REFUSED_PREFIX = '[auth-refused]';
 
-export type AuthRefusalLayer = 'shape_guard' | 'root_write' | 'middleware';
+export type AuthRefusalLayer = 'shape_guard' | 'scope_guard' | 'root_write' | 'middleware';
 
 export interface AuthRefusal {
   route: string;

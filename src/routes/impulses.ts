@@ -17,7 +17,7 @@
  */
 
 import { Hono, type Context } from 'hono';
-import { getJwtAuthFromContext } from '../middleware/jwtAuth';
+import { getJwtAuthFromContext, type JwtAuthContext } from '../middleware/jwtAuth';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 import { runInRequestAuthScope, currentRequestAuthScope } from '../db/request-auth-scope';
@@ -116,6 +116,30 @@ export function unauthenticatedResolveAllowed(shape: string, pointer: Record<str
   if (!UNAUTHENTICATED_READ_SHAPES.includes(shape)) return false;
   if (shape === 'concept' && pointer.concept_id) return false;
   return true;
+}
+
+/**
+ * WHO MAY RESOLVE A `_write` SHAPE. Authentication alone admitted every write
+ * shape, so a key identity issued with exactly [read] created concepts, links
+ * and usage records. A `_write` shape (the fleet's state-changing suffix, as
+ * discovery's forward check reads it) now needs a credential whose validated
+ * scopes carry WRITE_SCOPE or ADMIN_SCOPE. The scopes are the ones the auth
+ * middleware set from the validator's answer (identity-vessel for an ApiKey,
+ * the session for a JWT), never anything on the pointer. The node's own key
+ * has no shortcut: identity validates it like any key and it passes by the
+ * write scope it was issued with. No context, or no scopes, is refused (fail
+ * closed). Read shapes are unaffected, so a [read] key still reads.
+ */
+export const WRITE_SCOPE = 'write';
+export const ADMIN_SCOPE = 'admin';
+
+export function isWriteShape(shape: string): boolean {
+  return shape.endsWith('_write');
+}
+
+export function mayWriteConcepts(auth: JwtAuthContext | null | undefined): boolean {
+  const scopes = Array.isArray(auth?.scopes) ? auth!.scopes : [];
+  return scopes.includes(WRITE_SCOPE) || scopes.includes(ADMIN_SCOPE);
 }
 
 /**
@@ -485,6 +509,31 @@ async function resolveImpulse(c: Context): Promise<Response> {
         unauthenticated_read_shapes: UNAUTHENTICATED_READ_SHAPES,
       },
       401,
+    );
+  }
+
+  // The write grant (mayWriteConcepts above), checked before any resolver runs:
+  // refused 403 with nothing written. The refusal names the scope needed, never
+  // the caller's credential.
+  if (isWriteShape(shape) && !mayWriteConcepts(jwtAuth)) {
+    logAuthRefused({
+      route: `${c.req.method} ${c.req.path}`,
+      shape,
+      layer: 'scope_guard',
+      reason: 'WRITE_SCOPE_REQUIRED: credential lacks the write scope',
+      caller_hint: scope?.callerHint ?? callerHint(c),
+    });
+    return c.json(
+      {
+        success: false,
+        error: 'Write scope required',
+        code: 'WRITE_SCOPE_REQUIRED',
+        shape,
+        message:
+          `Shape "${shape}" requires a credential issued with the "${WRITE_SCOPE}" scope (or "${ADMIN_SCOPE}"); ` +
+          'a read-only credential may read concepts but not write them.',
+      },
+      403,
     );
   }
 

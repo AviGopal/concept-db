@@ -30,6 +30,12 @@ export interface JwtAuthContext {
   authType?: 'jwt' | 'apikey';
   keyId?: string;
   userId?: string;
+  /**
+   * The credential's scopes as the validator answered them: identity-vessel for an
+   * ApiKey, the session's `$auth.scopes` for a JWT. Absent when the validator gave
+   * none. Never read from the request body or pointer.
+   */
+  scopes?: string[];
 }
 
 /**
@@ -147,6 +153,7 @@ async function tryIdentityValidation(
       userId: result.data.userId,
       keyId: result.data.keyId,
       authType: 'apikey',
+      ...(Array.isArray(result.data.scopes) ? { scopes: result.data.scopes.map(String) } : {}),
     };
   } catch (error) {
     logger.warn('[ApiKey] Identity vessel unreachable', {
@@ -273,6 +280,7 @@ async function resolveAuthHeader(authHeader: string): Promise<JwtAuthContext | n
       instanceId: auth.instance_id,
       role: auth.role,
       authType: 'jwt',
+      ...(Array.isArray(auth.scopes) ? { scopes: auth.scopes.map(String) } : {}),
     };
 
     logger.debug('JWT authentication successful', {

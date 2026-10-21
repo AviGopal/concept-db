@@ -115,7 +115,7 @@ class FakeSurreal {
     const s = String(sql);
     // jwtAuthMiddleware reads the claims of an authenticated JWT session.
     if (this.token && s.includes('$auth.org_id')) {
-      return [{ id: 'user:u1', org_id: 'organizations:org-jwt', role: 'member' }];
+      return [{ id: 'user:u1', org_id: 'organizations:org-jwt', role: 'member', scopes: ['read', 'write'] }];
     }
     dbCalls.push({ sql: s, client: this.token ? 'jwt' : 'root' });
     return [respond(s, (params ?? {}) as Record<string, any>)];
@@ -148,7 +148,7 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     if (key === GOOD_KEY) {
       return new Response(JSON.stringify({
         success: true,
-        data: { authenticated: true, orgId: 'org-key', userId: 'user-key', keyId: 'key-1' },
+        data: { authenticated: true, orgId: 'org-key', userId: 'user-key', keyId: 'key-1', scopes: ['read', 'write'] },
       }), { status: 200 });
     }
     return new Response(JSON.stringify({ success: true, data: { authenticated: false, orgId: '' } }), { status: 200 });
