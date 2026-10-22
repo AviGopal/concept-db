@@ -72,9 +72,10 @@ describe('/v2/impulses/resolve → impulseSignatureConcept', () => {
   const app = new Hono();
   // Writing and unknown shapes require an authenticated caller. These tests exercise
   // dispatch as an ApiKey caller: an empty jwtToken keeps the root-client path and
-  // org 'default', the same DB path the tests covered before.
+  // org 'default', the same DB path the tests covered before. impulseSignatureConcept
+  // writes, so the caller carries the scopes a fleet key is issued with.
   app.use('*', async (c, next) => {
-    c.set('jwtAuth', { jwtToken: '', orgId: 'default', authType: 'apikey' });
+    c.set('jwtAuth', { jwtToken: '', orgId: 'default', authType: 'apikey', scopes: ['read', 'write'] });
     await next();
   });
   app.route('/v2/impulses', impulses);

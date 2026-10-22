@@ -6,6 +6,7 @@
 
 import { Hono } from 'hono';
 import { getJwtAuthFromContext } from '../middleware/jwtAuth';
+import { writeScopeRefusal } from './impulses';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 import {
@@ -36,6 +37,12 @@ import {
 
 const concepts = new Hono();
 
+// Every route here that writes (create, from-source, upsert-by-signature, update,
+// link, usage, sequences, delete) checks the write grant (writeScopeRefusal in
+// ./impulses) after authentication and before reading the body: a credential
+// without the write scope is refused 403 and nothing is written. Reads (GET,
+// and POST /:id/resolve) stay open to a [read] credential.
+
 /**
  * Create a concept
  * POST /concepts
@@ -47,6 +54,9 @@ concepts.post('/', async (c) => {
   if (!jwtAuth) {
     return c.json({ error: 'Authentication required' }, 401);
   }
+
+  const refusal = writeScopeRefusal(c, jwtAuth);
+  if (refusal) return c.json(refusal, 403);
 
   const orgId = jwtAuth?.orgId || 'default';
 
@@ -74,6 +84,9 @@ concepts.post('/from-source', async (c) => {
   if (!jwtAuth) {
     return c.json({ error: 'Authentication required' }, 401);
   }
+
+  const refusal = writeScopeRefusal(c, jwtAuth);
+  if (refusal) return c.json(refusal, 403);
 
   const orgId = jwtAuth?.orgId || 'default';
 
@@ -188,6 +201,9 @@ concepts.post('/upsert-by-signature', async (c) => {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
+  const refusal = writeScopeRefusal(c, jwtAuth);
+  if (refusal) return c.json(refusal, 403);
+
   const orgId = jwtAuth?.orgId || 'default';
 
   let body: { pointer_type?: unknown; shape?: unknown };
@@ -296,6 +312,9 @@ concepts.patch('/:id', async (c) => {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
+  const refusal = writeScopeRefusal(c, jwtAuth);
+  if (refusal) return c.json(refusal, 403);
+
   const orgId = jwtAuth.orgId || 'default';
   const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
 
@@ -391,6 +410,9 @@ concepts.post('/:id/link', async (c) => {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
+  const refusal = writeScopeRefusal(c, jwtAuth);
+  if (refusal) return c.json(refusal, 403);
+
   const orgId = jwtAuth.orgId || 'default';
   const rawFromId = c.req.param('id');
   const fromConceptId = normalizeConceptId(rawFromId) ?? rawFromId;
@@ -432,6 +454,9 @@ concepts.post('/:id/usage', async (c) => {
   if (!jwtAuth) {
     return c.json({ error: 'Authentication required' }, 401);
   }
+
+  const refusal = writeScopeRefusal(c, jwtAuth);
+  if (refusal) return c.json(refusal, 403);
 
   const orgId = jwtAuth.orgId || 'default';
   const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
@@ -542,6 +567,9 @@ concepts.post('/sequences', async (c) => {
     return c.json({ error: 'Authentication required' }, 401);
   }
 
+  const refusal = writeScopeRefusal(c, jwtAuth);
+  if (refusal) return c.json(refusal, 403);
+
   const orgId = jwtAuth?.orgId || 'default';
 
   try {
@@ -559,6 +587,8 @@ concepts.post('/sequences', async (c) => {
 concepts.delete('/:id', async (c) => {
   const jwtAuth = getJwtAuthFromContext(c);
   if (!jwtAuth) return c.json({ error: 'Authentication required' }, 401);
+  const refusal = writeScopeRefusal(c, jwtAuth);
+  if (refusal) return c.json(refusal, 403);
   const conceptId = normalizeConceptId(c.req.param('id')) ?? c.req.param('id');
   const result = await deleteConcept(conceptId, jwtAuth.orgId);
   return c.json(result, result.status as 200 | 403 | 404);

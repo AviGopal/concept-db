@@ -143,6 +143,61 @@ export function mayWriteConcepts(auth: JwtAuthContext | null | undefined): boole
 }
 
 /**
+ * Shapes that write without the `_write` suffix. impulseSignatureConcept
+ * upserts a concept whose text is built from the caller's pointer_type and
+ * shape, so it needs the write grant like any `_write` shape.
+ */
+export const UNSUFFIXED_WRITE_SHAPES: readonly string[] = ['impulseSignatureConcept'];
+
+export function needsWriteScope(shape: string): boolean {
+  return isWriteShape(shape) || UNSUFFIXED_WRITE_SHAPES.includes(shape);
+}
+
+export interface WriteScopeRefusal {
+  success: false;
+  error: 'Write scope required';
+  code: 'WRITE_SCOPE_REQUIRED';
+  shape?: string;
+  tool?: string;
+  message: string;
+}
+
+/**
+ * The write grant at every concept-db write ingress: this resolve route, the
+ * REST writes under /concepts and the MCP tools under /mcp. Null when the
+ * caller may write (mayWriteConcepts); otherwise logs one [auth-refused] line
+ * at the scope_guard layer and returns the 403 body. Callers check it before
+ * any resolver runs, so a refused request writes nothing. The refusal names
+ * the scope needed, never the caller's credential.
+ */
+export function writeScopeRefusal(
+  c: Context,
+  jwtAuth: JwtAuthContext | null | undefined,
+  target: { shape?: string; tool?: string } = {},
+): WriteScopeRefusal | null {
+  if (mayWriteConcepts(jwtAuth)) return null;
+  const route = `${c.req.method} ${c.req.path}`;
+  logAuthRefused({
+    route,
+    shape: target.shape,
+    layer: 'scope_guard',
+    reason: `WRITE_SCOPE_REQUIRED: credential lacks the write scope${target.tool ? ` (tool ${target.tool})` : ''}`,
+    caller_hint: currentRequestAuthScope()?.callerHint ?? callerHint(c),
+  });
+  const subject = target.shape ? `Shape "${target.shape}"` : target.tool ? `Tool "${target.tool}"` : `"${route}"`;
+  return {
+    success: false,
+    error: 'Write scope required',
+    code: 'WRITE_SCOPE_REQUIRED',
+    ...(target.shape ? { shape: target.shape } : {}),
+    ...(target.tool ? { tool: target.tool } : {}),
+    message:
+      `${subject} requires a credential issued with the "${WRITE_SCOPE}" scope (or "${ADMIN_SCOPE}"); ` +
+      'a read-only credential may read concepts but not write them.',
+  };
+}
+
+/**
  * Emit a `conceptUpkeepAuditLog` impulse for a write resolver call.
  * Non-blocking — a failed audit logs but does not roll back the mutation.
  *
@@ -512,29 +567,13 @@ async function resolveImpulse(c: Context): Promise<Response> {
     );
   }
 
-  // The write grant (mayWriteConcepts above), checked before any resolver runs:
-  // refused 403 with nothing written. The refusal names the scope needed, never
-  // the caller's credential.
-  if (isWriteShape(shape) && !mayWriteConcepts(jwtAuth)) {
-    logAuthRefused({
-      route: `${c.req.method} ${c.req.path}`,
-      shape,
-      layer: 'scope_guard',
-      reason: 'WRITE_SCOPE_REQUIRED: credential lacks the write scope',
-      caller_hint: scope?.callerHint ?? callerHint(c),
-    });
-    return c.json(
-      {
-        success: false,
-        error: 'Write scope required',
-        code: 'WRITE_SCOPE_REQUIRED',
-        shape,
-        message:
-          `Shape "${shape}" requires a credential issued with the "${WRITE_SCOPE}" scope (or "${ADMIN_SCOPE}"); ` +
-          'a read-only credential may read concepts but not write them.',
-      },
-      403,
-    );
+  // The write grant (writeScopeRefusal above), checked before any resolver runs:
+  // a principal without the write scope is refused 403 with nothing written. A
+  // caller with no context was already refused 401 by the shape guard above;
+  // the root client's write refusal stays the backstop behind both.
+  if (jwtAuth && needsWriteScope(shape)) {
+    const refusal = writeScopeRefusal(c, jwtAuth, { shape });
+    if (refusal) return c.json(refusal, 403);
   }
 
   try {

@@ -8,10 +8,24 @@ import { Hono } from 'hono';
 import { conceptTools, getToolByName } from '../tools/definitions';
 import { handleToolCall } from '../tools/handler';
 import { getJwtAuthFromContext } from '../middleware/jwtAuth';
+import { writeScopeRefusal } from './impulses';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 
 const mcp = new Hono();
+
+/**
+ * Tools a [read] credential may call. Every other tool writes (concept_create,
+ * concept_link, concept_upsert_by_signature, concept_record_usage,
+ * concept_sequence_record) and needs the write grant (writeScopeRefusal), so a
+ * tool added later is refused to a read credential until it is listed here.
+ */
+export const MCP_READ_TOOLS: readonly string[] = [
+  'concept_resolve',
+  'concept_search',
+  'concept_neighbors',
+  'concept_cooccurrence_edges',
+];
 
 /**
  * List available tools
@@ -74,6 +88,11 @@ mcp.post('/tools/call', async (c) => {
     return c.json({ error: `Unknown tool: ${tool}` }, 404);
   }
 
+  if (!MCP_READ_TOOLS.includes(tool)) {
+    const refusal = writeScopeRefusal(c, jwtAuth, { tool });
+    if (refusal) return c.json(refusal, 403);
+  }
+
   logger.info('MCP tool call received', {
     tool,
     org_id: orgId,
@@ -121,6 +140,10 @@ mcp.post('/tools/batch', async (c) => {
       const toolDef = getToolByName(call.tool);
       if (!toolDef) {
         return { tool: call.tool, success: false, error: `Unknown tool: ${call.tool}` };
+      }
+      if (!MCP_READ_TOOLS.includes(call.tool)) {
+        const refusal = writeScopeRefusal(c, jwtAuth, { tool: call.tool });
+        if (refusal) return refusal;
       }
 
       const result = await handleToolCall(call.tool, call.arguments || {}, orgId, jwtAuth?.jwtToken);
