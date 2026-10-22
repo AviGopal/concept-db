@@ -119,6 +119,24 @@ export function unauthenticatedResolveAllowed(shape: string, pointer: Record<str
 }
 
 /**
+ * The deepest row a conceptSearch page may start at. The scalar path pages with
+ * `START $offset` over a filter-inside subquery, so a page costs about offset + limit
+ * rows materialised and sorted (searchConcepts measured ~4k rows at ~0.5 s); 10,000
+ * keeps the deepest page within a few seconds while sitting far past any window a
+ * reader walks. The route does not clamp `limit`, so there is no limit cap to mirror.
+ */
+export const CONCEPT_SEARCH_MAX_OFFSET = 10_000;
+
+/** Why a conceptSearch pointer.offset is refused, or null when it is absent or a valid page start. */
+export function conceptSearchOffsetRefusal(offset: unknown): string | null {
+  if (offset === undefined || offset === null) return null;
+  if (typeof offset !== 'number' || !Number.isInteger(offset) || offset < 0 || offset > CONCEPT_SEARCH_MAX_OFFSET) {
+    return `pointer.offset must be an integer from 0 to ${CONCEPT_SEARCH_MAX_OFFSET} for shape "conceptSearch"`;
+  }
+  return null;
+}
+
+/**
  * WHO MAY RESOLVE A `_write` SHAPE. Authentication alone admitted every write
  * shape, so a key identity issued with exactly [read] created concepts, links
  * and usage records. A `_write` shape (the fleet's state-changing suffix, as
@@ -674,7 +692,12 @@ async function resolveImpulse(c: Context): Promise<Response> {
       }
 
       case 'conceptSearch': {
-  const rows = await searchConcepts({ offset: 0, query: pointer.query, source_type: pointer.source_type, shape: pointer.shape, min_relevance: pointer.min_relevance, limit: pointer.limit ?? 20 }, orgId, jwtToken);
+  // A reader pages with pointer.offset (absent or null = the first window). It was hard-wired to 0,
+  // so no reader could see past the first `limit` rows. An offset that is not a non-negative
+  // integer within CONCEPT_SEARCH_MAX_OFFSET is refused 400, like the route's other bad pointers.
+  const offsetRefusal = conceptSearchOffsetRefusal(pointer.offset);
+  if (offsetRefusal) return c.json({ error: offsetRefusal }, 400);
+  const rows = await searchConcepts({ offset: pointer.offset ?? 0, query: pointer.query, source_type: pointer.source_type, shape: pointer.shape, min_relevance: pointer.min_relevance, limit: pointer.limit ?? 20 }, orgId, jwtToken);
   result = { content: rows, metadata: { shape: 'conceptSearch', count: rows.length } };
   break;
 }
