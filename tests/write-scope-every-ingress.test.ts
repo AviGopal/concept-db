@@ -12,6 +12,9 @@
  *   [MUST-FAIL] a [read] ApiKey is refused 403 with no state-changing statement
  *               on every REST write route, every MCP write tool (call and
  *               batch) and impulseSignatureConcept;
+ *   [MUST-FAIL] a write shape resolved with no auth context is refused 401 at
+ *               the shape guard, which the scope guard relies on, and
+ *               nothing is queried;
  *   [CONTROL]   a read,write key writes through each; a [read] key still reads
  *               (GET /concepts/:id, GET /concepts/search, MCP concept_search,
  *               a read batch entry, the concept search shape).
@@ -146,7 +149,8 @@ function app(): Hono {
 async function send(method: string, path: string, authorization: string, body?: unknown) {
   const res = await app().request(path, {
     method,
-    headers: { 'Content-Type': 'application/json', Authorization: authorization },
+    // An empty authorization sends no Authorization header (a caller with no auth context).
+    headers: { 'Content-Type': 'application/json', ...(authorization ? { Authorization: authorization } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   let json: any = null;
@@ -258,6 +262,24 @@ describe('the unsuffixed write shape impulseSignatureConcept needs the write sco
     const r = await send('POST', '/v2/impulses/resolve', 'ApiKey read-only-key', { pointer: { type: 'concept', query: 'hello' } });
     expect(r.status).toBe(200);
   });
+});
+
+describe('a write shape with no auth context is refused 401 at the shape guard', () => {
+  // The resolve route's scope guard applies to a caller with an auth context;
+  // a caller with none must already be refused by the shape guard. REQUIRE_AUTH
+  // is off so the middleware lets the request through with no context.
+  for (const pointer of [
+    { type: 'concept_create_write', conceptData: { source_type: 'extracted', content: 'hello world' } },
+    SIGNATURE.pointer,
+  ]) {
+    test(`[MUST-FAIL] no credential on ${pointer.type} is refused 401 AUTH_REQUIRED, nothing queried`, async () => {
+      config.auth.requireAuth = false;
+      const r = await send('POST', '/v2/impulses/resolve', '', { pointer });
+      expect(r.status).toBe(401);
+      expect(r.body?.code).toBe('AUTH_REQUIRED');
+      expect(calls).toEqual([]);
+    });
+  }
 });
 
 test('the refusal names the scope, never the credential', async () => {
