@@ -125,6 +125,9 @@ export const ConceptSchema = z.object({
   public: z.boolean().default(false),
   org_id: z.string(),
   project_id: z.string().optional().nullable(),
+  /** The writing key's id and name, stamped server-side from the validated credential. */
+  written_by_key: z.string().optional().nullable(),
+  written_by: z.string().optional().nullable(),
   created_at: z.string().datetime().optional(),
   updated_at: z.string().datetime().optional(),
 });

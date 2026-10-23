@@ -1041,7 +1041,11 @@ case 'relatedConcepts': {
         }
         try {
           const request = CreateConceptRequestSchema.parse(writePointer.conceptData);
-          const concept = await createConcept(request, orgId, jwtToken);
+          // Stamped from the key identity validated, overriding anything conceptData declares.
+          const concept = await createConcept(request, orgId, jwtToken, {
+            written_by_key: jwtAuth?.keyId,
+            written_by: jwtAuth?.keyName,
+          });
           const auditImpulseId = await emitWriteAudit({
             resolverId: 'concept_create_write',
             operation: 'create',

@@ -75,12 +75,22 @@ async function computeHash(content: string): Promise<string> {
 }
 
 /**
+ * Who wrote a concept, as the server validated it: the writing key's id and name.
+ * Never taken from the request. A field left undefined is stored as NONE.
+ */
+export interface ConceptAuthor {
+  written_by_key?: string;
+  written_by?: string;
+}
+
+/**
  * Create a new concept
  */
 export async function createConcept(
   request: CreateConceptRequest,
   orgId: string,
-  jwtToken?: string
+  jwtToken?: string,
+  author?: ConceptAuthor
 ): Promise<Concept> {
   const id = `concept_${nanoid(12)}`;
   const shape = inferShape(request.source_type, request.shape);
@@ -131,6 +141,18 @@ export async function createConcept(
     params.project_id = request.project_id;
   }
 
+  // Authorship comes only from the validated credential (author), never from the
+  // request, so a client cannot claim another writer.
+  let authorClause = '';
+  if (author?.written_by_key) {
+    authorClause += ', written_by_key = $written_by_key';
+    params.written_by_key = author.written_by_key;
+  }
+  if (author?.written_by) {
+    authorClause += ', written_by = $written_by';
+    params.written_by = author.written_by;
+  }
+
   const sql = `
     CREATE type::thing("concept", $id) SET
       id = $id,
@@ -149,7 +171,7 @@ export async function createConcept(
       resolution_snapshot = NONE,
       scope = $scope,
       public = $public,
-      org_id = $org_id${projectIdClause}
+      org_id = $org_id${projectIdClause}${authorClause}
   `;
 
   const results = jwtToken

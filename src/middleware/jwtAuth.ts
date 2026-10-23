@@ -29,6 +29,12 @@ export interface JwtAuthContext {
   role?: string;
   authType?: 'jwt' | 'apikey';
   keyId?: string;
+  /**
+   * The ApiKey's name as identity answered it on validate/resolve. Absent for a JWT
+   * session and when identity gave none (an older identity). Never read from the
+   * request body or pointer.
+   */
+  keyName?: string;
   userId?: string;
   /**
    * The credential's scopes as the validator answered them: identity-vessel for an
@@ -123,6 +129,7 @@ async function tryIdentityValidation(
         orgId: string;
         userId?: string;
         keyId?: string;
+        name?: string;
         scopes?: string[];
         reason?: string;
       };
@@ -152,6 +159,7 @@ async function tryIdentityValidation(
       orgId: result.data.orgId,
       userId: result.data.userId,
       keyId: result.data.keyId,
+      ...(typeof result.data.name === 'string' ? { keyName: result.data.name } : {}),
       authType: 'apikey',
       ...(Array.isArray(result.data.scopes) ? { scopes: result.data.scopes.map(String) } : {}),
     };
