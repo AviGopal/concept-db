@@ -25,6 +25,7 @@
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { recordUsage as defaultRecordUsage } from '../resolvers/usage';
+import { normalizeConceptId } from './passive-usage';
 import type { RecordUsageRequest, Outcome } from '../models/schemas';
 
 export interface ImpulseResolutionLike {
@@ -75,9 +76,30 @@ export interface ToolCallEvent {
   };
 }
 
+/**
+ * A walk's graded outcome. `reached` is the reach verdict, never the exit status: activity-api's
+ * `execution_completed` carries `success` (the template exited cleanly), which is not whether the goal was
+ * reached, so it is never read as one. An event with no boolean `reached` is ungraded and credits nothing.
+ * `recalled_concept_ids` may name the walk's recalled concepts directly; otherwise the ones the walk recalled
+ * through this vessel under the same execution id (walkRecallLedger) are used.
+ */
+export interface WalkVerdictEvent {
+  type: 'execution_completed';
+  sequence?: number;
+  data: {
+    execution_id: string;
+    activity_id?: string;
+    success?: boolean;
+    reached?: boolean;
+    recalled_concept_ids?: string[];
+    [key: string]: unknown;
+  };
+}
+
 export type ObservedEvent =
   | TaskCompletedEvent
   | ToolCallEvent
+  | WalkVerdictEvent
   | { type: string; sequence?: number; data?: unknown };
 
 export interface ExecutionObserverOptions {
@@ -85,6 +107,8 @@ export interface ExecutionObserverOptions {
   /** Called when the set of described shapes may have changed (a vessel registered, left or expired; a template was
    *  created): the shape index re-syncs (upkeep/shape-index.ts). */
   onShapeRegistryChange?: (reason: string) => void;
+  /** The recall record a walk verdict credits. Defaults to the shared walkRecallLedger the concept search writes. */
+  recallLedger?: WalkRecallLedger;
   // Injected for testability. Defaults to the real `recordUsage` resolver.
   recordUsage?: (
     request: RecordUsageRequest,
@@ -178,6 +202,87 @@ export function buildUsageRequestsFromTaskCompleted(
   }));
 }
 
+/** One concept a walk recalled, with the org whose concept it is (usage is recorded against the concept's own org). */
+export interface RecalledConcept {
+  concept_id: string;
+  org_id?: string;
+}
+
+/**
+ * WHICH CONCEPTS A WALK RECALLED, KEPT UNTIL ITS VERDICT ARRIVES. A walk recalls its lessons through concept
+ * search, and nothing linked those concept ids to the walk's execution: usage was credited only to concepts whose
+ * ids appear among a completed task's impulse ids, which a recalled lesson never is. So when the walk reached, none
+ * of the concepts it recalled gained success, and when it fell short none gained failure: recalled lessons never
+ * earned a posterior from the outcomes they informed. A search that names the walk's execution id notes what it
+ * returned here; the walk's graded verdict takes it (once) and credits each concept. Bounded: the oldest walk's
+ * record is dropped first, so a verdict that never comes costs a slot, not memory.
+ */
+export class WalkRecallLedger {
+  private readonly byExecution = new Map<string, Map<string, string | undefined>>();
+
+  constructor(private readonly maxExecutions = 5000) {}
+
+  note(executionId: string, recalled: ReadonlyArray<{ id?: unknown; org_id?: unknown }>, callerOrgId?: string): void {
+    if (!executionId || !Array.isArray(recalled) || recalled.length === 0) return;
+    const row = this.byExecution.get(executionId) ?? new Map<string, string | undefined>();
+    for (const r of recalled) {
+      const raw = r?.id;
+      const conceptId = normalizeConceptId(typeof raw === 'string' ? raw : raw != null ? String(raw) : undefined);
+      if (!conceptId) continue;
+      row.set(conceptId, typeof r?.org_id === 'string' && r.org_id ? r.org_id : callerOrgId);
+    }
+    if (row.size === 0) return;
+    this.byExecution.delete(executionId);
+    this.byExecution.set(executionId, row);
+    while (this.byExecution.size > this.maxExecutions) {
+      const oldest = this.byExecution.keys().next().value;
+      if (oldest === undefined) break;
+      this.byExecution.delete(oldest);
+    }
+  }
+
+  peek(executionId: string): RecalledConcept[] {
+    return [...(this.byExecution.get(executionId) ?? new Map<string, string | undefined>()).entries()].map(
+      ([concept_id, org_id]) => ({ concept_id, ...(org_id ? { org_id } : {}) }),
+    );
+  }
+
+  take(executionId: string): RecalledConcept[] {
+    const out = this.peek(executionId);
+    this.byExecution.delete(executionId);
+    return out;
+  }
+}
+
+/** The shared recall record: the concept search notes into it, the observer's walk-verdict handler credits from it. */
+export const walkRecallLedger = new WalkRecallLedger();
+
+/**
+ * Turn a walk's graded verdict into one usage row per concept it recalled: reached -> success, graded and not
+ * reached -> failure (the same success/failure mapping task credit uses). Ungraded (no boolean `reached`) -> none.
+ * Exported for unit testing.
+ */
+export function buildUsageRequestsFromWalkVerdict(
+  event: WalkVerdictEvent,
+  recalled: ReadonlyArray<string> = [],
+): RecordUsageRequest[] {
+  const data = event?.data;
+  if (!data || typeof data.execution_id !== 'string' || !data.execution_id) return [];
+  if (typeof data.reached !== 'boolean') return [];
+  const ids = new Set<string>();
+  for (const raw of [...(Array.isArray(data.recalled_concept_ids) ? data.recalled_concept_ids : []), ...recalled]) {
+    const id = normalizeConceptId(raw);
+    if (id) ids.add(id);
+  }
+  const outcome: Outcome = data.reached ? 'success' : 'failure';
+  return [...ids].map((concept_id) => ({
+    concept_id,
+    trace_id: data.execution_id,
+    ...(typeof data.activity_id === 'string' && data.activity_id ? { activity_id: data.activity_id } : {}),
+    outcome,
+  }));
+}
+
 export class ExecutionObserver {
   private ws: WebSocket | null = null;
   private shouldRun = false;
@@ -188,6 +293,7 @@ export class ExecutionObserver {
   private readonly recordUsageFn: NonNullable<
     ExecutionObserverOptions['recordUsage']
   >;
+  private readonly recallLedger: WalkRecallLedger;
 
   constructor(options: ExecutionObserverOptions = {}) {
     this.currentBackoffMs = config.observer.reconnectInitialMs;
@@ -196,6 +302,7 @@ export class ExecutionObserver {
     // impulse-relevance POST is best-effort.
     this.orgId = options.orgId ?? 'system';
     this.recordUsageFn = options.recordUsage ?? defaultRecordUsage;
+    this.recallLedger = options.recallLedger ?? walkRecallLedger;
     this.onShapeRegistryChange = options.onShapeRegistryChange;
   }
   private onShapeRegistryChange?: (reason: string) => void;
@@ -378,6 +485,9 @@ export class ExecutionObserver {
       case 'tool.call':
         this.handleToolCall(event as ToolCallEvent);
         return;
+      case 'execution_completed':
+        await this.handleWalkVerdict(event as WalkVerdictEvent);
+        return;
       case 'vessel.registered':
       case 'vessel.deregistered':
       case 'vessel.expired':
@@ -407,6 +517,31 @@ export class ExecutionObserver {
         // Don't let one bad row abort the rest. Concept might not exist
         // locally, the DB might be transiently down, etc.
         logger.warn('[Observer] recordUsage failed', {
+          concept_id: req.concept_id,
+          trace_id: req.trace_id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  private async handleWalkVerdict(event: WalkVerdictEvent): Promise<void> {
+    const executionId = event?.data?.execution_id;
+    // Ungraded: credit nothing, and keep the recall for the verdict that grades this walk later.
+    if (typeof executionId !== 'string' || typeof event.data.reached !== 'boolean') return;
+    const recalled = this.recallLedger.take(executionId);
+    const orgOf = new Map(recalled.map((r) => [r.concept_id, r.org_id]));
+    const requests = buildUsageRequestsFromWalkVerdict(event, recalled.map((r) => r.concept_id));
+    for (const req of requests) {
+      try {
+        await this.recordUsageFn(req, orgOf.get(req.concept_id) ?? this.orgId);
+        logger.debug('[Observer] Credited recalled concept', {
+          concept_id: req.concept_id,
+          trace_id: req.trace_id,
+          outcome: req.outcome,
+        });
+      } catch (error) {
+        logger.warn('[Observer] recordUsage failed for a recalled concept', {
           concept_id: req.concept_id,
           trace_id: req.trace_id,
           error: error instanceof Error ? error.message : String(error),

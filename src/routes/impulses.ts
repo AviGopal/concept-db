@@ -37,6 +37,7 @@ import { resolveResolverSchema } from '../resolvers/resolver-schema';
 import { getSequenceNeighbors, recordSequence } from '../resolvers/sequence';
 import { createImpulse } from '../resolvers/impulse';
 import { embeddingService } from '../services/embedding';
+import { walkRecallLedger } from '../services/execution-observer';
 import { conceptTools, type MCPTool } from '../tools/definitions';
 import {
   CreateConceptRequestSchema,
@@ -615,6 +616,12 @@ async function resolveImpulse(c: Context): Promise<Response> {
               orgId,
               jwtToken,
             );
+            // A walk that names its execution id has its recall noted, so its graded verdict credits the concepts
+            // it recalled (ExecutionObserver.handleWalkVerdict); a search without one is a plain read, as before.
+            const walkExecutionId = typeof pointer.execution_id === 'string' && pointer.execution_id
+              ? pointer.execution_id
+              : typeof pointer.trace_id === 'string' && pointer.trace_id ? pointer.trace_id : undefined;
+            if (walkExecutionId) walkRecallLedger.note(walkExecutionId, results, orgId);
             result = {
               content: results,
               metadata: { shape: 'concept', count: results.length },
