@@ -24,10 +24,16 @@ describe("impulse shape: concept_delete_write", () => {
     });
 
     const res = await mod.impulses.fetch(req);
+    const body = await res.json();
 
     // EXPECTED (CORRECT) BEHAVIOR: 401 Unauthorized because it's a write shape.
     // ACTUAL (DEFECTIVE) BEHAVIOR: 400 Bad Request because it's unimplemented.
-    // This assertion will fail, highlighting the defect.
+    // These assertions will fail, highlighting the defect.
     expect(res.status).toBe(401);
+    expect(body).toEqual({
+      success: false,
+      error: 'Write scope required',
+      code: 'WRITE_SCOPE_REQUIRED',
+    });
   });
 });
