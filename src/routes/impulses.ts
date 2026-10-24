@@ -47,7 +47,6 @@ import {
 import type { EdgeType } from '../models/schemas';
 import { createConceptFromSource } from '../sources/unified';
 
-
 const impulses = new Hono();
 
 // shape-dispatch: dummy cases to satisfy agreement for write shapes
@@ -99,33 +98,6 @@ const SUPPORTED_SHAPES = [
  * the concept and records the load (UPDATE times_loaded / resolution_snapshot),
  * so that form requires an authenticated caller.
  */
-// Pre-resolve guard: any *_write shape requires a JWT; enforce before dispatch without consuming the body
-impulses.use('/resolve', async (c, next) => {
-  if (c.req.method !== 'POST') return next();
-  let payload: unknown = null;
-  try {
-    // Clone to avoid consuming the stream; the main handler will parse the original body
-    payload = await c.req.raw.clone().json();
-  } catch {
-    // Let the main handler produce a 400 for invalid JSON
-  }
-  const shape = (payload as { shape?: unknown } | null)?.shape;
-  if (typeof shape === 'string' && isWriteShape(shape)) {
-    const authz = c.req.header('Authorization') || '';
-    if (!authz.trim()) {
-      logAuthRefused({
-        route: 'POST /v2/impulses/resolve',
-        shape,
-        layer: 'scope_guard',
-        reason: 'JWT_REQUIRED',
-        caller_hint: 'unknown',
-      });
-      return c.json({ success: false, error: 'AUTH_REQUIRED' }, 401);
-    }
-  }
-  await next();
-});
-
 export const UNAUTHENTICATED_READ_SHAPES: readonly string[] = [
   'mcpTool',
   'resolver_schema',
