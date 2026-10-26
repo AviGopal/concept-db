@@ -531,10 +531,16 @@ export class ExecutionObserver {
     if (typeof executionId !== 'string' || typeof event.data.reached !== 'boolean') return;
     const recalled = this.recallLedger.take(executionId);
     const orgOf = new Map(recalled.map((r) => [r.concept_id, r.org_id]));
+    // The ledger only knows an org for concepts this vessel itself recalled (concept search noted them). A concept
+    // recalled elsewhere and carried only on `recalled_concept_ids` has no ledger row, so it fell back to
+    // `this.orgId` ('system' in practice — see constructor) and recordUsage refused it as not found in that org.
+    // activity-api's execution_completed already carries the dispatch's own org as `data.org_id`; prefer it over
+    // the vessel-wide default so a concept living in its own org (not locally ledgered) still gets credited there.
+    const dispatchOrgId = typeof event.data.org_id === 'string' && event.data.org_id ? event.data.org_id : undefined;
     const requests = buildUsageRequestsFromWalkVerdict(event, recalled.map((r) => r.concept_id));
     for (const req of requests) {
       try {
-        await this.recordUsageFn(req, orgOf.get(req.concept_id) ?? this.orgId);
+        await this.recordUsageFn(req, orgOf.get(req.concept_id) ?? dispatchOrgId ?? this.orgId);
         logger.debug('[Observer] Credited recalled concept', {
           concept_id: req.concept_id,
           trace_id: req.trace_id,
