@@ -1,5 +1,5 @@
 /**
- * LocalEmbeddingService — all-MiniLM-L6-v2 via onnxruntime-node
+ * LocalEmbeddingService — all-MiniLM-L6-v2 via onnxruntime-node, run in a worker thread.
  *
  * Loads the ONNX model from disk (EMBEDDING_MODEL_DIR env var, default
  * /app/models/all-MiniLM-L6-v2). Init is async and non-blocking; callers
@@ -7,15 +7,26 @@
  *
  * Produces L2-normalised 384-dim Float32Arrays. Cosine similarity over
  * normalised vectors reduces to a dot product.
+ *
+ * THE ACTUAL ONNX INFERENCE RUNS IN embedding-worker.ts, NOT HERE. This class spawns that
+ * worker once (init()) and talks to it over postMessage; every public method below keeps
+ * its old signature and behaviour. See embedding-worker.ts's header comment for why: a
+ * same-thread `session.run()` call could run for 8-11s (measured live, 2026-09-03) and
+ * block the event loop for its whole duration, including the `setTimeout` that
+ * `searchConcepts`'s DENSE_BUDGET_MS race depends on — so the race could not enforce its
+ * own 2s budget against a slow embed. The worker boundary fixes that without touching the
+ * race itself: the main thread stays free to run its timers regardless of how long the
+ * worker takes, so a slow embed now actually gets abandoned at ~DENSE_BUDGET_MS instead of
+ * at the embed's own duration. The tokenizer, the ONNX session, and the mean-pool/L2-
+ * normalise maths moved to the worker VERBATIM, so a given text still produces the
+ * bit-identical vector it always did.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import { randomUUID } from 'node:crypto';
+import { Worker } from 'node:worker_threads';
 import { logger } from '../utils/logger';
 
-const MODEL_DIR = process.env.EMBEDDING_MODEL_DIR ?? '/app/models/all-MiniLM-L6-v2';
 const DIM = 384;
-const MAX_SEQ_LEN = 128;
 
 /**
  * QUERY-EMBEDDING CACHE.
@@ -41,7 +52,8 @@ const MAX_SEQ_LEN = 128;
  *
  * The consult reduces a spec to a few salient terms, so queries repeat heavily across
  * composes — the workload a cache is for. Bounded LRU: a cache that can grow without limit
- * would trade a latency defect for a memory one.
+ * would trade a latency defect for a memory one. The cache stays on the MAIN thread (not
+ * in the worker): a cache hit must not pay even the cost of a worker round-trip.
  */
 const EMBED_CACHE_CAPACITY = Number(process.env.EMBEDDING_CACHE_CAPACITY ?? 512);
 
@@ -75,108 +87,17 @@ export class EmbeddingCache {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Minimal WordPiece tokeniser
-// ---------------------------------------------------------------------------
-
-class WordPieceTokenizer {
-  private vocab = new Map<string, number>();
-  private unkId = 100;
-  private clsId = 101;
-  private sepId = 102;
-  private padId = 0;
-
-  load(vocabPath: string): void {
-    const lines = fs.readFileSync(vocabPath, 'utf-8').split('\n');
-    lines.forEach((token, idx) => {
-      const t = token.trim();
-      if (t) this.vocab.set(t, idx);
-    });
-    this.unkId = this.vocab.get('[UNK]') ?? 100;
-    this.clsId = this.vocab.get('[CLS]') ?? 101;
-    this.sepId = this.vocab.get('[SEP]') ?? 102;
-    this.padId = this.vocab.get('[PAD]') ?? 0;
-  }
-
-  encode(text: string): {
-    input_ids: BigInt64Array;
-    attention_mask: BigInt64Array;
-    token_type_ids: BigInt64Array;
-  } {
-    const tokens = this.tokenize(text);
-    const ids: number[] = [this.clsId];
-    for (const tok of tokens) {
-      if (ids.length >= MAX_SEQ_LEN - 1) break;
-      ids.push(this.vocab.get(tok) ?? this.unkId);
-    }
-    ids.push(this.sepId);
-
-    const seqLen = ids.length;
-    const input_ids = new BigInt64Array(MAX_SEQ_LEN).fill(BigInt(this.padId));
-    const attention_mask = new BigInt64Array(MAX_SEQ_LEN).fill(BigInt(0));
-    const token_type_ids = new BigInt64Array(MAX_SEQ_LEN).fill(BigInt(0));
-
-    for (let i = 0; i < seqLen; i++) {
-      input_ids[i] = BigInt(ids[i]);
-      attention_mask[i] = BigInt(1);
-    }
-
-    return { input_ids, attention_mask, token_type_ids };
-  }
-
-  private tokenize(text: string): string[] {
-    const words = text
-      .toLowerCase()
-      .replace(/[^\w\s]/g, ' $& ')
-      .split(/\s+/)
-      .filter(Boolean);
-    const result: string[] = [];
-    for (const word of words) {
-      result.push(...this.wordPiece(word));
-    }
-    return result;
-  }
-
-  private wordPiece(word: string): string[] {
-    if (this.vocab.has(word)) return [word];
-    const chars = [...word];
-    if (chars.length === 1) return [word];
-
-    const tokens: string[] = [];
-    let start = 0;
-    while (start < chars.length) {
-      let end = chars.length;
-      let found = '';
-      while (end > start) {
-        const substr = chars.slice(start, end).join('');
-        const candidate = start === 0 ? substr : `##${substr}`;
-        if (this.vocab.has(candidate)) {
-          found = candidate;
-          break;
-        }
-        end--;
-      }
-      if (!found) {
-        tokens.push('[UNK]');
-        start++;
-      } else {
-        tokens.push(found);
-        start = end;
-      }
-    }
-    return tokens;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Service
-// ---------------------------------------------------------------------------
+type PendingEmbed = { resolve: (vec: number[]) => void; reject: (err: Error) => void };
+type PendingBusyWait = { resolve: () => void };
 
 class LocalEmbeddingServiceImpl {
-  private session: any | null = null;
-  private tokenizer = new WordPieceTokenizer();
+  private worker: Worker | null = null;
   private ready = false;
   private initError: string | null = null;
+  private readonly pendingEmbeds = new Map<string, PendingEmbed>();
+  private readonly pendingBusyWaits = new Map<string, PendingBusyWait>();
+  private readonly embedCache = new EmbeddingCache(EMBED_CACHE_CAPACITY);
+  private modelStatusResolved: Promise<void> | null = null;
 
   isReady(): boolean {
     return this.ready;
@@ -190,85 +111,69 @@ class LocalEmbeddingServiceImpl {
     };
   }
 
+  /** Spawns the embedding worker once and waits for its model-load attempt to settle
+   *  (success or failure — both resolve init(), matching the old same-thread behaviour
+   *  where a missing model left isReady() false rather than rejecting). */
   async init(): Promise<void> {
-    const modelPath = path.join(MODEL_DIR, 'model.onnx');
-    const vocabPath = path.join(MODEL_DIR, 'vocab.txt');
+    if (this.worker) return this.modelStatusResolved ?? Promise.resolve();
 
-    if (!fs.existsSync(modelPath) || !fs.existsSync(vocabPath)) {
-      this.initError = `Model files not found at ${MODEL_DIR}`;
-      logger.warn('[LocalEmbedding] Model files missing — dense search disabled', {
-        modelPath,
-        vocabPath,
-      });
-      return;
-    }
+    const worker = new Worker(new URL('./embedding-worker.ts', import.meta.url));
+    this.worker = worker;
 
-    try {
-      const ort = await import('onnxruntime-node');
-      this.session = await ort.InferenceSession.create(modelPath, {
-        executionProviders: ['cpu'],
-        graphOptimizationLevel: 'all',
-      });
-      this.tokenizer.load(vocabPath);
-      this.ready = true;
-      logger.info('[LocalEmbedding] all-MiniLM-L6-v2 loaded', { dim: DIM, modelPath });
-    } catch (err) {
+    let resolveModelStatus: () => void = () => {};
+    this.modelStatusResolved = new Promise((resolve) => { resolveModelStatus = resolve; });
+
+    worker.on('message', (msg: any) => {
+      if (!msg || typeof msg !== 'object') return;
+      if (msg.type === 'model_status') {
+        this.ready = !!msg.ok;
+        this.initError = msg.error ?? null;
+        if (!this.ready) {
+          logger.warn('[LocalEmbedding] Model files missing — dense search disabled', { error: this.initError });
+        } else {
+          logger.info('[LocalEmbedding] all-MiniLM-L6-v2 loaded', { dim: DIM });
+        }
+        resolveModelStatus();
+      } else if (msg.type === 'embed_result') {
+        const p = this.pendingEmbeds.get(msg.id);
+        if (p) { this.pendingEmbeds.delete(msg.id); p.resolve(msg.vec); }
+      } else if (msg.type === 'embed_error') {
+        const p = this.pendingEmbeds.get(msg.id);
+        if (p) { this.pendingEmbeds.delete(msg.id); p.reject(new Error(msg.error ?? 'embed failed in worker')); }
+      } else if (msg.type === 'test_busy_wait_done') {
+        const p = this.pendingBusyWaits.get(msg.id);
+        if (p) { this.pendingBusyWaits.delete(msg.id); p.resolve(); }
+      }
+    });
+    worker.on('error', (err) => {
       this.initError = err instanceof Error ? err.message : String(err);
-      logger.error('[LocalEmbedding] Failed to load ONNX model', { error: this.initError });
-    }
+      this.ready = false;
+      logger.error('[LocalEmbedding] embedding worker failed', { error: this.initError });
+      resolveModelStatus();
+    });
+
+    await this.modelStatusResolved;
   }
 
-  private readonly embedCache = new EmbeddingCache(EMBED_CACHE_CAPACITY);
-
   async embed(text: string): Promise<Float32Array> {
-    if (!this.ready || !this.session) {
+    if (!this.ready || !this.worker) {
       throw new Error('LocalEmbeddingService not ready');
     }
 
     // See the EMBEDDING CACHE note above: an identical query recomputed a full ONNX
     // inference every time (measured 8.5s / 11.6s / 8.4s for three runs of one string),
-    // which is the whole reason the drafter's 8s principle consult was timing out.
+    // which is the whole reason the drafter's 8s principle consult was timing out. The
+    // cache lives here, on the main thread, so a hit never even reaches the worker.
     const cacheKey = embeddingCacheKey(text);
     const cached = this.embedCache.get(cacheKey);
     if (cached !== undefined) return cached;
 
-    const ort = await import('onnxruntime-node');
-    const { input_ids, attention_mask, token_type_ids } = this.tokenizer.encode(text);
-    const shape = [1, MAX_SEQ_LEN];
-
-    const feeds: Record<string, any> = {
-      input_ids: new ort.Tensor('int64', input_ids, shape),
-      attention_mask: new ort.Tensor('int64', attention_mask, shape),
-      token_type_ids: new ort.Tensor('int64', token_type_ids, shape),
-    };
-
-    const output = await this.session.run(feeds);
-    const hiddenState: Float32Array = output['last_hidden_state']?.data as Float32Array;
-    if (!hiddenState) {
-      throw new Error('Unexpected ONNX output — missing last_hidden_state');
-    }
-
-    // Mean-pool over non-padded token positions
-    const vec = new Float32Array(DIM);
-    let tokenCount = 0;
-    for (let t = 0; t < MAX_SEQ_LEN; t++) {
-      if (attention_mask[t] === BigInt(0)) continue;
-      tokenCount++;
-      for (let d = 0; d < DIM; d++) {
-        vec[d] += hiddenState[t * DIM + d];
-      }
-    }
-    if (tokenCount > 0) {
-      for (let d = 0; d < DIM; d++) vec[d] /= tokenCount;
-    }
-
-    // L2 normalise
-    let norm = 0;
-    for (let d = 0; d < DIM; d++) norm += vec[d] * vec[d];
-    norm = Math.sqrt(norm);
-    if (norm > 0) {
-      for (let d = 0; d < DIM; d++) vec[d] /= norm;
-    }
+    const id = randomUUID();
+    const vecArr = await new Promise<number[]>((resolve, reject) => {
+      this.pendingEmbeds.set(id, { resolve, reject });
+      this.worker!.postMessage({ type: 'embed', id, text });
+    });
+    const vec = Float32Array.from(vecArr);
 
     // Cache the FINISHED vector (mean-pooled and L2-normalised), so a hit is byte-for-byte
     // what a miss would have produced.
@@ -279,7 +184,27 @@ class LocalEmbeddingServiceImpl {
   async embedBatch(texts: string[]): Promise<Float32Array[]> {
     return Promise.all(texts.map((t) => this.embed(t)));
   }
+
+  /**
+   * TEST-ONLY. Asks the worker to busy-wait for `ms` on ITS OWN thread and resolves when it
+   * replies. Used by tests/embedding-worker-isolation.test.ts to prove that a long
+   * synchronous computation routed to the worker does not block the main thread's event
+   * loop (the architectural claim this file's header comment makes) — without needing real
+   * model files or a timing-sensitive real inference call. Requires init() to have been
+   * called (the worker must be spawned; it does not need the model to have loaded, since
+   * this never touches the model). Never called from production code.
+   */
+  async __testBusyWaitInWorker(ms: number): Promise<void> {
+    if (!this.worker) {
+      throw new Error('LocalEmbeddingService not initialised — call init() first');
+    }
+    const id = randomUUID();
+    await new Promise<void>((resolve) => {
+      this.pendingBusyWaits.set(id, { resolve });
+      this.worker!.postMessage({ type: 'test_busy_wait', id, ms });
+    });
+  }
 }
 
-/** Singleton local embedding service (all-MiniLM-L6-v2 via ONNX Runtime) */
+/** Singleton local embedding service (all-MiniLM-L6-v2 via ONNX Runtime, run in a worker) */
 export const embeddingService = new LocalEmbeddingServiceImpl();
