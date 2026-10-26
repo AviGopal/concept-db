@@ -90,6 +90,11 @@ export class EmbeddingCache {
 type PendingEmbed = { resolve: (vec: number[]) => void; reject: (err: Error) => void };
 type PendingBusyWait = { resolve: () => void };
 
+/** Cap on the worker-respawn backoff, so a worker that crashes immediately on every
+ *  start (a bad model path, a crash loop) backs off instead of spinning. */
+const RESPAWN_BACKOFF_CAP_MS = 30_000;
+const RESPAWN_BACKOFF_BASE_MS = 250;
+
 class LocalEmbeddingServiceImpl {
   private worker: Worker | null = null;
   private ready = false;
@@ -98,6 +103,18 @@ class LocalEmbeddingServiceImpl {
   private readonly pendingBusyWaits = new Map<string, PendingBusyWait>();
   private readonly embedCache = new EmbeddingCache(EMBED_CACHE_CAPACITY);
   private modelStatusResolved: Promise<void> | null = null;
+  /** Set once init() has actually spawned a worker. Distinguishes "never started" (embed()
+   *  should throw its plain not-ready error, as always) from "started, then the worker
+   *  died" (embed() should try a lazy respawn first). */
+  private everInitialized = false;
+  /** Consecutive worker deaths since the last successful model_status. Drives the backoff
+   *  below; reset to 0 the moment a respawned worker reports a real model_status (ok or
+   *  not — reaching that point means the worker process itself is viable again). */
+  private respawnAttempts = 0;
+  /** Earliest time (Date.now()) a lazy respawn may be attempted again. 0 = no backoff in
+   *  effect. Prevents a "tight loop" of synchronous respawns against a worker that keeps
+   *  dying immediately on start. */
+  private nextRespawnAllowedAt = 0;
 
   isReady(): boolean {
     return this.ready;
@@ -115,19 +132,75 @@ class LocalEmbeddingServiceImpl {
    *  (success or failure — both resolve init(), matching the old same-thread behaviour
    *  where a missing model left isReady() false rather than rejecting). */
   async init(): Promise<void> {
+    this.everInitialized = true;
     if (this.worker) return this.modelStatusResolved ?? Promise.resolve();
+    return this.spawnWorker();
+  }
 
+  /**
+   * Spawns one worker and wires its lifecycle. Returns a promise that settles once the
+   * worker's model_status arrives OR the worker dies before it ever does — both cases
+   * unblock a caller awaiting this, matching the old same-thread behaviour where a
+   * missing model left isReady() false rather than hanging a caller forever.
+   *
+   * ON 'error' AND ON 'exit' (BOTH — Node can emit either, or both, for the same crash;
+   * a native ONNX abort, an OOM kill, or an explicit process.exit() inside the worker
+   * produce 'exit' with no preceding 'error' at all, and `worker.terminate()` ALWAYS
+   * produces only 'exit'): every pending embed and busy-wait is settled immediately (never
+   * left to hang — a hung caller is worse than the pre-worker behaviour this file replaced,
+   * because it never times out on its own), `ready` drops to false, and the dead worker
+   * reference is dropped so the NEXT embed() knows to respawn rather than post into the
+   * void. Idempotent: 'error' then 'exit' for the same crash must not double-reject an
+   * already-cleared pendingEmbeds map, and a handler firing on an ALREADY-REPLACED worker
+   * (this.worker !== the one that died) is a no-op.
+   */
+  private spawnWorker(): Promise<void> {
     const worker = new Worker(new URL('./embedding-worker.ts', import.meta.url));
     this.worker = worker;
 
     let resolveModelStatus: () => void = () => {};
-    this.modelStatusResolved = new Promise((resolve) => { resolveModelStatus = resolve; });
+    const modelStatusResolved = new Promise<void>((resolve) => { resolveModelStatus = resolve; });
+    this.modelStatusResolved = modelStatusResolved;
+
+    let handledDeath = false;
+    const onDeath = (reason: 'error' | 'exit', detail: string): void => {
+      if (handledDeath) return; // 'error' then 'exit' for the same crash — handle once
+      if (this.worker !== worker) return; // this worker was already replaced; not our concern
+      handledDeath = true;
+
+      const message = `embedding worker ${reason} (${detail})`;
+      logger.error('[LocalEmbedding] embedding worker died — rejecting in-flight embeds, will respawn lazily', {
+        reason,
+        detail,
+        pending_embeds: this.pendingEmbeds.size,
+      });
+
+      this.ready = false;
+      this.initError = message;
+      this.worker = null;
+
+      const failure = new Error(message);
+      for (const p of this.pendingEmbeds.values()) p.reject(failure);
+      this.pendingEmbeds.clear();
+      for (const p of this.pendingBusyWaits.values()) p.resolve();
+      this.pendingBusyWaits.clear();
+
+      this.respawnAttempts += 1;
+      const backoffMs = Math.min(RESPAWN_BACKOFF_CAP_MS, RESPAWN_BACKOFF_BASE_MS * 2 ** (this.respawnAttempts - 1));
+      this.nextRespawnAllowedAt = Date.now() + backoffMs;
+
+      resolveModelStatus();
+    };
 
     worker.on('message', (msg: any) => {
       if (!msg || typeof msg !== 'object') return;
       if (msg.type === 'model_status') {
         this.ready = !!msg.ok;
         this.initError = msg.error ?? null;
+        // The worker process itself came up and answered — whatever the model's own
+        // status, the crash-backoff no longer applies to IT.
+        this.respawnAttempts = 0;
+        this.nextRespawnAllowedAt = 0;
         if (!this.ready) {
           logger.warn('[LocalEmbedding] Model files missing — dense search disabled', { error: this.initError });
         } else {
@@ -145,17 +218,28 @@ class LocalEmbeddingServiceImpl {
         if (p) { this.pendingBusyWaits.delete(msg.id); p.resolve(); }
       }
     });
-    worker.on('error', (err) => {
-      this.initError = err instanceof Error ? err.message : String(err);
-      this.ready = false;
-      logger.error('[LocalEmbedding] embedding worker failed', { error: this.initError });
-      resolveModelStatus();
-    });
+    worker.on('error', (err) => onDeath('error', err instanceof Error ? err.message : String(err)));
+    worker.on('exit', (code) => onDeath('exit', `code ${code}`));
 
-    await this.modelStatusResolved;
+    return modelStatusResolved;
+  }
+
+  /** Lazy respawn, called from embed() when a previously-spawned worker has died. Backs
+   *  off per `nextRespawnAllowedAt` (set in spawnWorker()'s onDeath) rather than retrying
+   *  on every single embed() call against a worker that keeps dying immediately — a
+   *  caller inside the backoff window just falls through to the plain not-ready error
+   *  below, the same as if the model had never loaded. */
+  private async maybeRespawn(): Promise<void> {
+    if (this.worker) return;
+    if (Date.now() < this.nextRespawnAllowedAt) return;
+    logger.warn('[LocalEmbedding] respawning embedding worker after it died', { attempt: this.respawnAttempts + 1 });
+    await this.spawnWorker();
   }
 
   async embed(text: string): Promise<Float32Array> {
+    if (this.everInitialized && !this.worker) {
+      await this.maybeRespawn();
+    }
     if (!this.ready || !this.worker) {
       throw new Error('LocalEmbeddingService not ready');
     }
