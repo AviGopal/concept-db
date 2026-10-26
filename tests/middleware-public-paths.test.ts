@@ -81,6 +81,11 @@ class FakeSurreal {
 }
 mock.module('surrealdb', () => ({ Surreal: FakeSurreal }));
 
+// The real module, captured before the stub replaces it, so afterAll can put it back.
+// mock.module is process-wide and bun orders test files by directory listing, which
+// differs by filesystem: left in place, this stub reaches every later file, including
+// the embedding worker tests that drive the real service.
+const previousEmbeddingModule = { ...(await import('../src/services/embedding')) };
 mock.module('../src/services/embedding', () => ({
   embeddingCacheKey: (t: string) => t,
   EmbeddingCache: class { get() { return undefined; } set() {} },
@@ -162,6 +167,7 @@ afterAll(() => {
   (globalThis as any).WebSocket = originalWebSocket;
   configPins.forEach(([obj, key], i) => { obj[key] = savedConfig[i]; });
   mock.module('../src/db/surreal', () => previousSurrealModule);
+  mock.module('../src/services/embedding', () => previousEmbeddingModule);
 });
 
 let forbiddenSeen = 0;
