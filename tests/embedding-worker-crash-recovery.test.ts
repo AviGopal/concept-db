@@ -21,7 +21,7 @@
  * `worker.terminate()` triggers ONLY 'exit' (never 'error') — exactly the uncovered path
  * from the bug report — so it is what this test uses to kill the worker.
  */
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, afterEach } from 'bun:test';
 
 // This file's OWN instance of the module, not the shared specifier: in a one-process run an
 // earlier file may have replaced '../src/services/embedding' with a stub through mock.module
@@ -29,22 +29,43 @@ import { describe, test, expect } from 'bun:test';
 // patched methods on the shared singleton. Neither reaches an instance loaded here.
 const EMBEDDING = '../src/services/embedding.ts?hermetic=embedding-worker-crash-recovery';
 
+/**
+ * Each test drives its OWN service instance (the singleton's class, so this works at every
+ * commit that has the singleton), never the module's singleton itself: this file's MUST-FAIL
+ * deliberately kills a worker and leaves the respawn backoff armed, and a shared instance
+ * would carry that into the CONTROL. Every worker a test spawns is terminated afterwards,
+ * so none outlives its test.
+ */
+const spawned: Array<Record<string, any>> = [];
+async function freshService(): Promise<Record<string, any>> {
+  const { embeddingService } = (await import(EMBEDDING)) as any;
+  const Impl = (embeddingService as any).constructor;
+  const svc = new Impl() as Record<string, any>;
+  spawned.push(svc);
+  return svc;
+}
+afterEach(() => {
+  while (spawned.length) spawned.pop()!.worker?.terminate();
+});
+
+/** What the worker is expected to answer for an embed it cannot run (no model in this
+ *  environment): the same error the pre-worker same-thread service threw. */
+const NOT_READY = 'LocalEmbeddingService not ready';
+
 describe('embedding worker crash recovery', () => {
   test(
     'MUST-FAIL: terminating the worker mid-embed rejects the pending call promptly (not hangs), and the next call gets a fresh worker',
     async () => {
-      const mod = (await import(EMBEDDING)) as any;
-      const { embeddingService } = mod;
-      const svc = embeddingService as Record<string, any>;
+      const svc = await freshService();
 
-      await embeddingService.init();
+      await svc.init();
       const deadWorker = svc.worker;
       expect(deadWorker).toBeTruthy();
 
       // Simulate "an embed is mid-flight" directly against the real pendingEmbeds map —
       // the same map embed() itself populates — rather than racing a real postMessage
       // against termination, so the test is deterministic regardless of how fast the
-      // (model-less) worker would otherwise have replied.
+      // worker would otherwise have replied.
       const markerId = 'mf-mid-embed-marker';
       const pendingSettled = new Promise<number[]>((resolve, reject) => {
         svc.pendingEmbeds.set(markerId, { resolve, reject });
@@ -65,38 +86,62 @@ describe('embedding worker crash recovery', () => {
       // A respawn right after death is backed off on purpose (so a worker that dies on
       // every start does not spin) — this FIRST post-crash call lands inside that window
       // and correctly gets the same "not ready" a caller would see with no worker at all,
-      // without a fresh spawn yet.
-      await expect(embeddingService.embed('post-crash-probe')).rejects.toThrow(/not ready/i);
+      // without a fresh spawn yet. True with or without a model: there is no worker.
+      await expect(svc.embed('post-crash-probe')).rejects.toThrow(/not ready/i);
       expect(svc.worker).toBeNull();
 
       // Once the backoff window has passed, the NEXT call gets a FRESH worker, lazily
-      // (not eagerly at crash time): embed() itself triggers the respawn. The model is
-      // not present in this sandbox, so the call ultimately still rejects with "not
-      // ready" — that part is unrelated to crash recovery and unavoidable here — but the
-      // respawn side effect (a new worker object, genuinely alive) happens regardless,
-      // which is the thing under test.
+      // (not eagerly at crash time): embed() itself triggers the respawn. Whether that call
+      // then embeds depends only on whether a model is present here (not ready without
+      // one, a vector with one); the respawn is the thing under test.
       await new Promise((resolve) => setTimeout(resolve, 300)); // > the 250ms base backoff
-      await expect(embeddingService.embed('post-crash-probe-2')).rejects.toThrow(/not ready/i);
+      const second = await svc.embed('post-crash-probe-2').then(
+        (vec: Float32Array) => ({ vec, err: null as Error | null }),
+        (err: Error) => ({ vec: null as Float32Array | null, err }),
+      );
+      if (svc.isReady()) expect(second.vec?.length).toBe(384);
+      else expect(second.err?.message).toMatch(/not ready/i);
       expect(svc.worker).toBeTruthy();
       expect(svc.worker).not.toBe(deadWorker);
 
       // Prove the fresh worker actually answers (model-independent: the test-only
       // busy-wait hook never touches the model), rather than merely existing as an object.
-      await embeddingService.__testBusyWaitInWorker(10);
+      await svc.__testBusyWaitInWorker(10);
     },
-    5_000, // bound the wait: at the parent this must FAIL on timeout, not hang the suite
+    10_000, // bound the wait: at the parent this must FAIL on timeout, not hang the suite
   );
 
   test('CONTROL: the normal embed() path is unaffected when the worker has not died', async () => {
-    const mod = (await import(EMBEDDING)) as any;
-    const { embeddingService } = mod;
-    const svc = embeddingService as Record<string, any>;
+    const svc = await freshService();
 
-    await embeddingService.init();
-    // No model in this sandbox, so the normal (non-crash) path still reports not-ready —
-    // exactly the parent's own behaviour, unchanged by this fix. The crash-recovery
-    // machinery above must not alter this ordinary case.
-    expect(embeddingService.isReady()).toBe(false);
-    await expect(embeddingService.embed('control string')).rejects.toThrow('LocalEmbeddingService not ready');
-  });
+    await svc.init();
+    expect(svc.worker).toBeTruthy();
+
+    if (svc.isReady()) {
+      // A model is present: the real path returns the L2-normalised 384-dim vector.
+      const vec: Float32Array = await svc.embed('control string');
+      expect(vec.length).toBe(384);
+      const norm = Math.sqrt(vec.reduce((a, v) => a + v * v, 0));
+      expect(Math.abs(norm - 1)).toBeLessThan(1e-3);
+      return;
+    }
+
+    // No model: the main thread refuses before posting, with the same error the
+    // same-thread service threw, unchanged by the crash-recovery machinery.
+    await expect(svc.embed('control string')).rejects.toThrow(NOT_READY);
+
+    // And the message path itself, which the refusal above never reaches: let the request
+    // through to the live worker. With no model it must answer that same error over
+    // postMessage (embed_error), settle and clear its pending entry, and stay alive.
+    // (Settled with then/catch, not expect().rejects: under bun's expect().rejects a promise
+    // that only a worker message can settle does not settle before the test times out.)
+    svc.ready = true;
+    const viaWorker = await svc.embed('control string').then(
+      () => null,
+      (err: Error) => err,
+    );
+    expect(viaWorker?.message).toBe(NOT_READY);
+    expect(svc.pendingEmbeds.size).toBe(0);
+    await svc.__testBusyWaitInWorker(10);
+  }, 10_000);
 });
