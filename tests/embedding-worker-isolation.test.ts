@@ -23,9 +23,15 @@
  */
 import { describe, test, expect } from 'bun:test';
 
+// This file's OWN instance of the module, not the shared specifier: in a one-process run an
+// earlier file may have replaced '../src/services/embedding' with a stub through mock.module
+// and never put it back (a file that throws while loading never runs its afterAll), or
+// patched methods on the shared singleton. Neither reaches an instance loaded here.
+const EMBEDDING = '../src/services/embedding.ts?hermetic=embedding-worker-isolation';
+
 describe('embedding worker isolation', () => {
   test('a long busy-wait routed to the worker does not block the main thread event loop', async () => {
-    const mod = (await import('../src/services/embedding')) as any;
+    const mod = (await import(EMBEDDING)) as any;
     const { embeddingService } = mod;
 
     expect(typeof embeddingService.__testBusyWaitInWorker).toBe('function');
@@ -58,8 +64,8 @@ describe('embedding worker isolation', () => {
     expect(performance.now() - busyStart).toBeGreaterThanOrEqual(0);
   }, 10_000);
 
-  test('CONTROL: the embedding cache still hits on a repeated string, independent of the worker', () => {
-    const { EmbeddingCache, embeddingCacheKey } = require('../src/services/embedding');
+  test('CONTROL: the embedding cache still hits on a repeated string, independent of the worker', async () => {
+    const { EmbeddingCache, embeddingCacheKey } = (await import(EMBEDDING)) as any;
     const cache = new EmbeddingCache(4);
     const key = embeddingCacheKey('a repeated query string');
     const vec = Float32Array.from([1, 2, 3]);
@@ -92,7 +98,7 @@ describe('embedding worker isolation', () => {
    * existed); the hook test proves the NEW path is non-blocking.
    */
   test('MUST-FAIL #2 (real path): a slow same-thread session.run would block the main thread at the parent; at the fix, no such session exists on the main thread to begin with', async () => {
-    const mod = (await import('../src/services/embedding')) as any;
+    const mod = (await import(EMBEDDING)) as any;
     const { embeddingService } = mod;
     const svc = embeddingService as Record<string, unknown>;
 

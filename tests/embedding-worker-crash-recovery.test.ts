@@ -23,11 +23,17 @@
  */
 import { describe, test, expect } from 'bun:test';
 
+// This file's OWN instance of the module, not the shared specifier: in a one-process run an
+// earlier file may have replaced '../src/services/embedding' with a stub through mock.module
+// and never put it back (a file that throws while loading never runs its afterAll), or
+// patched methods on the shared singleton. Neither reaches an instance loaded here.
+const EMBEDDING = '../src/services/embedding.ts?hermetic=embedding-worker-crash-recovery';
+
 describe('embedding worker crash recovery', () => {
   test(
     'MUST-FAIL: terminating the worker mid-embed rejects the pending call promptly (not hangs), and the next call gets a fresh worker',
     async () => {
-      const mod = (await import('../src/services/embedding')) as any;
+      const mod = (await import(EMBEDDING)) as any;
       const { embeddingService } = mod;
       const svc = embeddingService as Record<string, any>;
 
@@ -82,7 +88,7 @@ describe('embedding worker crash recovery', () => {
   );
 
   test('CONTROL: the normal embed() path is unaffected when the worker has not died', async () => {
-    const mod = (await import('../src/services/embedding')) as any;
+    const mod = (await import(EMBEDDING)) as any;
     const { embeddingService } = mod;
     const svc = embeddingService as Record<string, any>;
 
