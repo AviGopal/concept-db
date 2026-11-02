@@ -50,6 +50,44 @@ import { createConceptFromSource } from '../sources/unified';
 
 const impulses = new Hono();
 
+/**
+ * conceptSearch pointer.limit must be a positive integer. A negative, zero or
+ * non-numeric limit was forwarded verbatim into the SurrealQL `LIMIT` clause,
+ * where it surfaced as a database/driver error (a 500 for what is a client
+ * mistake) instead of a 400. Refuse it before dispatch, mirroring the
+ * offset guard's contract.
+ */
+export function conceptSearchLimitRefusal(limit: unknown): string | null {
+  if (limit === undefined || limit === null) return null;
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1) {
+    return 'pointer.limit must be a positive integer for shape "conceptSearch"';
+  }
+  return null;
+}
+
+// Edge guard for the resolve route: a bad conceptSearch limit is refused with
+// 400 before it can reach searchConcepts. The body is read from a clone so the
+// route's own parse still sees an unread request body.
+impulses.use('*', async (c, next) => {
+  if (c.req.method === 'POST') {
+    let body: unknown;
+    try {
+      body = await c.req.raw.clone().json();
+    } catch {
+      body = undefined;
+    }
+    if (typeof body === 'object' && body !== null) {
+      const envelope = body as { shape?: unknown; pointer?: unknown };
+      const pointer = envelope.pointer;
+      if (envelope.shape === 'conceptSearch' && typeof pointer === 'object' && pointer !== null) {
+        const refusal = conceptSearchLimitRefusal((pointer as { limit?: unknown }).limit);
+        if (refusal !== null) return c.json({ error: refusal }, 400);
+      }
+    }
+  }
+  await next();
+});
+
 // shape-dispatch: dummy cases to satisfy agreement for write shapes
 // These are no-ops to ensure advertised shapes have matching dispatch cases.
 // Real implementations can be added in the main resolver switch.
