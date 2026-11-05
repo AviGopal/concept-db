@@ -179,6 +179,19 @@ concepts.get('/search', async (c) => {
           };
           return rest;
         });
+    logger.info('Concept search completed', {
+      caller: jwtAuth
+        ? ('userId' in jwtAuth ? jwtAuth.userId : undefined)
+          ?? ('sub' in jwtAuth ? jwtAuth.sub : undefined)
+          ?? ('caller' in jwtAuth ? jwtAuth.caller : undefined)
+          ?? ('vesselId' in jwtAuth ? jwtAuth.vesselId : undefined)
+          ?? 'authenticated'
+        : 'unauthenticated',
+      orgId,
+      path: c.req.path,
+      leg: request.query ? 'query' : 'scalar',
+      count: projected.length,
+    });
     return c.json({ concepts: projected, count: projected.length });
   } catch (error) {
     const err = error as Error;
