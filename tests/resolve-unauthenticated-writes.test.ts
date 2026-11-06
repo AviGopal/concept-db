@@ -121,6 +121,9 @@ class FakeSurreal {
     return [respond(s, (params ?? {}) as Record<string, any>)];
   }
 }
+// The real driver, captured before the stub replaces it: left in place, the stub reaches the later
+// real-engine files, whose Surreal client then talks to nothing.
+const previousSurrealDriver = { ...(await import('surrealdb')) };
 mock.module('surrealdb', () => ({ Surreal: FakeSurreal }));
 
 // The real module, captured before the stub replaces it, so afterAll can put it back.
@@ -214,6 +217,7 @@ afterAll(() => {
   globalThis.fetch = originalFetch;
   (globalThis as any).WebSocket = originalWebSocket;
   configPins.forEach(([obj, key], i) => { obj[key] = savedConfig[i]; });
+  mock.module('surrealdb', () => previousSurrealDriver);
   mock.module('../src/db/surreal', () => previousSurrealModule);
   mock.module('../src/services/embedding', () => previousEmbeddingModule);
 });

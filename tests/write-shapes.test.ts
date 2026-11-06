@@ -91,6 +91,8 @@ function installSpy(store: FakeStore) {
       // the endpoint-ownership read every edge write now makes (org scoping on id paths): this fixture's endpoints are
       // the caller's own concepts
       if (/^\s*SELECT\s+VALUE\s+meta::id\(id\)\s+FROM\s+\[type::thing\("concept"/i.test(sql)) return [params.from_id, params.to_id] as never[];
+      // the concept-exists read recordUsage makes before writing a usage row: same fixture, the caller's own concept
+      if (/^\s*SELECT\s+id\s+FROM\s+concept\s+WHERE\s+id\s*=\s*type::thing\("concept",\s*\$cid\)/i.test(sql)) return [{ id: params.cid }] as never[];
 
       // ---- concept upserts (used by conceptSignatureUpsert_write) ----
       if (

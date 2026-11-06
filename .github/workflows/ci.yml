@@ -27,8 +27,20 @@ jobs:
         continue-on-error: true
         run: bunx tsc --noEmit
 
+      - name: Install SurrealDB (engine version the substrate runs; DB-backed tests spawn it in memory)
+        run: |
+          curl -sSfL https://github.com/surrealdb/surrealdb/releases/download/v2.3.10/surreal-v2.3.10.linux-amd64.tgz -o "$RUNNER_TEMP/surreal.tgz"
+          sudo tar xzf "$RUNNER_TEMP/surreal.tgz" -C /usr/local/bin surreal
+          surreal version
+
       - name: Run tests
         run: bun test
 
-      - name: Lint (includes shape-dispatch agreement check)
-        run: bun run lint
+      # The check reads the super-repo's packages/ at ../../packages, as it does in a super-repo checkout.
+      # `bun run lint` also runs eslint, which has no config in this repo, so CI runs the check alone.
+      - name: Shape-dispatch agreement check
+        run: |
+          git clone --quiet --depth 1 --filter=blob:none --sparse -b dev https://github.com/AviGopal/substrate.git "$RUNNER_TEMP/super"
+          git -C "$RUNNER_TEMP/super" sparse-checkout set packages/shape-dispatch-check
+          ln -sfn "$RUNNER_TEMP/super/packages" ../../packages
+          bun run scripts/check-shape-dispatch.ts
